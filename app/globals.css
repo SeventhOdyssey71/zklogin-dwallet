@@ -25,16 +25,9 @@ body {
   font-family: var(--font-geist-sans), system-ui, sans-serif;
 }
 
-/* Hide default cursor on desktop */
+/* Normal cursor everywhere */
 * {
-  cursor: none !important;
-}
-
-/* Keep default cursor on mobile */
-@media (max-width: 768px) {
-  * {
-    cursor: auto !important;
-  }
+  cursor: auto !important;
 }
 
 /* Custom selection colors */
@@ -64,4 +57,18 @@ html {
   html {
     scroll-behavior: auto;
   }
+}
+
+/* Ensure @mysten/dapp-kit wallet modal appears on top */
+[data-dapp-kit-modal],
+[data-dapp-kit-modal] ~ div,
+.dapp-kit-modal,
+.sui-wallet-modal {
+  z-index: 99999 !important;
+}
+
+/* Wallet modal overlay */
+[data-dapp-kit-modal-overlay],
+.dapp-kit-modal-overlay {
+  z-index: 99998 !important;
 }
