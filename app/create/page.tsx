@@ -6,10 +6,11 @@ import { useRouter } from 'next/navigation';
 import { Check, ArrowRight, ArrowLeft, Wallet, Shield, Zap, Loader2, Sparkles, AlertCircle } from 'lucide-react';
 import { useCurrentAccount, useSignAndExecuteTransaction, useSuiClient } from '@mysten/dapp-kit';
 import { Transaction } from '@mysten/sui/transactions';
+import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { dwalletAPI } from '@/lib/api/dwallet';
 import { useWalletStore } from '@/lib/store/walletStore';
 import { DWalletType } from '@/lib/types/dwallet';
-import { IkaClient, IkaTransaction, Curve, prepareDKGAsync, UserShareEncryptionKeys, coordinatorTransactions, getNetworkConfig } from '@ika.xyz/sdk';
+import { IkaClient, IkaTransaction, Curve, prepareDKGAsync, UserShareEncryptionKeys, getNetworkConfig, createRandomSessionIdentifier } from '@ika.xyz/sdk';
 
 type Step = 0 | 1 | 2 | 3 | 4;
 
@@ -20,12 +21,27 @@ export default function CreatePage() {
   // Sui Wallet Integration
   const account = useCurrentAccount();
   const suiClient = useSuiClient();
-  const { mutate: signAndExecuteTransaction } = useSignAndExecuteTransaction();
+  const { mutate: signAndExecuteTransaction } = useSignAndExecuteTransaction({
+    execute: async ({ bytes, signature }) => {
+      // Execute with full options to get objectChanges
+      const result = await suiClient.executeTransactionBlock({
+        transactionBlock: bytes,
+        signature,
+        options: {
+          showEffects: true,
+          showObjectChanges: true,
+          showEvents: true,
+        },
+      });
+      return result;
+    },
+  });
   const [mounted, setMounted] = useState(false);
 
   const [step, setStep] = useState<Step>(0);
   const [walletType, setWalletType] = useState<DWalletType>('ECDSA');
   const [walletName, setWalletName] = useState('');
+  const [privateKey, setPrivateKey] = useState('');
   const [isCreating, setIsCreating] = useState(false);
   const [createdWallet, setCreatedWallet] = useState<any>(null);
   const [creationError, setCreationError] = useState<string | null>(null);
@@ -100,70 +116,53 @@ export default function CreatePage() {
       console.log('🔐 Generated encryption keys for user share');
       console.log('🔑 Encryption key address:', userShareEncryptionKeys.getSuiAddress());
 
-      // Step 5: Create transaction with session identifier
+      // Step 5: Create transaction (matching working server implementation)
       const tx = new Transaction();
-      tx.setGasBudget(100000000); // 0.1 SUI
 
-      const ikaCoin = tx.object(largestIkaCoin.coinObjectId);
-      const suiCoin = tx.gas;
-
-      // Register session identifier
-      const sessionIdentifierBytes = new TextEncoder().encode(`dwallet-creation-${Date.now()}`);
-      const coordinatorObjectRef = tx.sharedObjectRef({
-        objectId: networkConfig.objects.ikaDWalletCoordinator.objectID,
-        initialSharedVersion: networkConfig.objects.ikaDWalletCoordinator.initialSharedVersion,
-        mutable: true,
-      });
-      const sessionIdentifier = coordinatorTransactions.registerSessionIdentifier(
-        networkConfig,
-        coordinatorObjectRef,
-        sessionIdentifierBytes,
-        tx
-      );
-
-      console.log('📝 Session identifier registered');
-
-      // Step 6: Create IkaTransaction wrapper
+      // Step 6: Create IkaTransaction wrapper FIRST (before defining coins)
       const ikaTx = new IkaTransaction({
         ikaClient,
         transaction: tx,
         userShareEncryptionKeys,
       });
 
-      // Step 7: Check if user has encryption key registered, if not register it
+      // NOW define coins AFTER IkaTransaction wrapper
+      const ikaCoin = tx.object(largestIkaCoin.coinObjectId);
+      const suiCoin = tx.gas; // Use tx.gas directly, don't split
+
+      // Use SDK's random session identifier (not timestamp-based)
+      const sessionIdentifierBytes = createRandomSessionIdentifier();
+      const sessionIdentifier = ikaTx.registerSessionIdentifier(sessionIdentifierBytes);
+
+      console.log('📝 Session identifier registered');
+      console.log('🔍 Transaction after session registration:', tx.getData().commands?.length, 'commands');
+      console.log('🔍 Commands:', JSON.stringify(tx.getData().commands, null, 2));
+
+      // Step 7: Check if user has encryption key registered, if not register it in this tx
       console.log('🔍 Checking for existing encryption key...');
-      let activeEncryptionKeyId;
+      let activeEncryptionKeyId: string;
       try {
-        activeEncryptionKeyId = await ikaClient.getActiveEncryptionKeyId(account.address, curve);
+        const encryptionKeyObj = await ikaClient.getActiveEncryptionKey(account.address);
+        // Extract the ID from the EncryptionKey object structure
+        activeEncryptionKeyId = encryptionKeyObj.id.id;
         console.log('✅ Found existing encryption key:', activeEncryptionKeyId);
       } catch (error) {
-        console.log('📝 No encryption key found, registering new one...');
+        console.log('📝 No encryption key found, will register in this transaction...');
         await ikaTx.registerEncryptionKey({ curve });
-        // After registering, we need to execute this transaction first before creating dWallet
-        console.log('⚠️ Need to register encryption key in a separate transaction first');
+        console.log('✅ Encryption key registration added to transaction');
+        console.log('🔍 Transaction after encryption key registration:', tx.getData().commands?.length, 'commands');
+        console.log('🔍 Commands:', JSON.stringify(tx.getData().commands, null, 2));
 
-        // Sign and execute the encryption key registration transaction
-        signAndExecuteTransaction(
-          { transaction: tx },
-          {
-            onSuccess: async (result) => {
-              console.log('✅ Encryption key registered successfully!');
-              console.log('🔄 Please try creating the dWallet again');
-              setCreationError('Encryption key registered. Please click "Create dWallet" again to continue.');
-              setIsCreating(false);
-            },
-            onError: (error) => {
-              console.error('❌ Failed to register encryption key:', error);
-              setCreationError('Failed to register encryption key: ' + error.message);
-              setIsCreating(false);
-            },
-          }
-        );
-        return; // Exit early, user needs to try again after key registration
+        // Get the latest network encryption key since we just added registration
+        const latestNetworkKey = await ikaClient.getLatestNetworkEncryptionKey();
+        activeEncryptionKeyId = latestNetworkKey.id;
+        console.log('📝 Will use latest network encryption key:', activeEncryptionKeyId);
       }
 
       // Step 8: Prepare DKG (Distributed Key Generation) parameters
       console.log('🔢 Preparing DKG cryptographic parameters...');
+      console.log('⏱️ This may take 10-30 seconds (heavy cryptography in WebAssembly)...');
+      const dkgStartTime = Date.now();
 
       const dkgRequestInput = await prepareDKGAsync(
         ikaClient,
@@ -173,10 +172,11 @@ export default function CreatePage() {
         account.address
       );
 
-      console.log('✅ DKG parameters prepared');
+      const dkgDuration = ((Date.now() - dkgStartTime) / 1000).toFixed(2);
+      console.log(`✅ DKG parameters prepared in ${dkgDuration}s`);
 
       // Step 9: Request dWallet DKG
-      const dwalletResult = await ikaTx.requestDWalletDKG({
+      const dWalletCap = await ikaTx.requestDWalletDKG({
         dkgRequestInput,
         ikaCoin,
         suiCoin,
@@ -186,9 +186,36 @@ export default function CreatePage() {
       });
 
       console.log('🏗️ dWallet DKG transaction built');
+      console.log('🔍 Transaction after DKG request:', tx.getData().commands?.length, 'commands');
+      console.log('🔍 Commands:', JSON.stringify(tx.getData().commands, null, 2));
 
-      // Step 10: Sign and execute transaction
+      // Step 10: Transfer DWalletCap to user (CRITICAL - SDK tests show this is required!)
+      tx.transferObjects([dWalletCap], account.address);
+      console.log('📦 Added transferObjects for DWalletCap');
+      console.log('🔍 Transaction after transfer:', tx.getData().commands?.length, 'commands');
+
+      // Step 11: Sign and execute transaction
       console.log('✍️ Requesting signature from user...');
+      const txData = tx.getData();
+      console.log('📝 Transaction object:', {
+        sender: txData.sender,
+        gasData: txData.gasData,
+        commands: txData.commands?.length,
+      });
+      console.log('📋 Transaction inputs:', txData.inputs);
+      console.log('🪙 IKA Coin object ID we are using:', largestIkaCoin.coinObjectId);
+
+      // Log Input 0 specifically (should be IKA coin)
+      if (txData.inputs && txData.inputs.length > 0) {
+        console.log('🔍 Input 0 (should be IKA coin):', txData.inputs[0]);
+        console.log('🔍 Input 1 (should be coordinator):', txData.inputs[1]);
+
+        // Check if Input 0 has the correct object ID
+        const input0 = txData.inputs[0] as any;
+        if (input0.$kind === 'UnresolvedObject') {
+          console.log('🔍 UnresolvedObject details:', input0.UnresolvedObject);
+        }
+      }
 
       signAndExecuteTransaction(
         {
@@ -197,7 +224,21 @@ export default function CreatePage() {
         {
           onSuccess: async (result) => {
             console.log('✅ Transaction executed successfully!');
-            console.log('📦 Result:', result);
+            console.log('📦 Full Result:', result);
+
+            // Check what happened to the coins
+            console.log('\n💰 Analyzing Object Changes:');
+            console.log('All changes:', result.objectChanges);
+
+            const ikaCoinChanges = result.objectChanges?.filter((change: any) =>
+              change.objectType?.includes('IKA')
+            );
+            console.log('\n🪙 IKA Coin Changes:', ikaCoinChanges);
+
+            const suiCoinChanges = result.objectChanges?.filter((change: any) =>
+              change.objectType?.includes('0x2::coin::Coin<0x2::sui::SUI>')
+            );
+            console.log('💎 SUI Coin Changes:', suiCoinChanges);
 
             // Extract dWallet ID from object changes
             let dwalletId = null;
@@ -214,7 +255,7 @@ export default function CreatePage() {
               throw new Error('Could not find created dWallet ID in transaction result');
             }
 
-            console.log('🆔 New dWallet ID:', dwalletId);
+            console.log('\n🆔 New dWallet ID:', dwalletId);
 
             // Create wallet object for UI
             const newWallet = {
@@ -238,8 +279,21 @@ export default function CreatePage() {
 
             console.log('🎉 dWallet created successfully in browser!');
           },
-          onError: (error) => {
+          onError: (error: any) => {
             console.error('❌ Transaction failed:', error);
+            console.error('❌ Error type:', error.constructor?.name);
+            console.error('❌ Error details:', {
+              message: error.message,
+              code: error.code,
+              data: error.data,
+              cause: error.cause,
+            });
+
+            // Try to get more details from the error
+            if (error.data) {
+              console.error('❌ Error data:', JSON.stringify(error.data, null, 2));
+            }
+
             setCreationError(error.message || 'Failed to create dWallet');
             setIsCreating(false);
           },
