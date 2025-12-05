@@ -18,6 +18,8 @@ import {
   ExternalLink
 } from 'lucide-react';
 import { dwalletAPI } from '@/lib/api/dwallet';
+import { getDWalletsFromBlockchain } from '@/lib/api/blockchainDwallet';
+import { useCurrentAccount } from '@mysten/dapp-kit';
 import { useWalletStore } from '@/lib/store/walletStore';
 import { DWallet } from '@/lib/types/dwallet';
 import { BentoCard } from '@/components/ui/BentoCard';
@@ -27,22 +29,59 @@ type SortBy = 'name' | 'balance' | 'created';
 
 export default function WalletsPage() {
   const { wallets, setWallets, isLoading, setLoading } = useWalletStore();
+  const account = useCurrentAccount();
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
   const [searchQuery, setSearchQuery] = useState('');
   const [filterType, setFilterType] = useState<'all' | 'ECDSA' | 'EdDSA'>('all');
   const [sortBy, setSortBy] = useState<SortBy>('created');
 
   useEffect(() => {
-    loadWallets();
-  }, []);
+    if (account) {
+      loadWallets();
+    }
+  }, [account]);
 
   const loadWallets = async () => {
+    if (!account) {
+      console.log('No wallet connected');
+      return;
+    }
+
     setLoading(true);
     try {
-      const data = await dwalletAPI.getDWallets();
-      setWallets(data);
+      console.log('📡 Fetching dWallets for address:', account.address);
+
+      // Fetch dWallets directly from blockchain
+      const blockchainWallets = await getDWalletsFromBlockchain(account.address);
+
+      console.log('✅ Found', blockchainWallets.length, 'dWallets');
+
+      // Convert to DWallet format for display
+      const formattedWallets: DWallet[] = blockchainWallets.map((wallet) => ({
+        id: wallet.id,
+        name: `dWallet ${wallet.id.substring(0, 8)}...`,
+        type: wallet.curve === 0 ? 'ECDSA' : 'EdDSA',
+        curve: wallet.curve === 0 ? 'SECP256K1' : 'ED25519',
+        publicKey: 'pending', // TODO: Extract from dWallet public key commitment
+        status: wallet.state === 'Active' ? 'ACTIVE' : wallet.state === 'AwaitingNetworkDKGVerification' ? 'PENDING' : 'INACTIVE',
+        compatibleChains: wallet.curve === 0
+          ? ['Bitcoin', 'Ethereum', 'Polygon', 'Avalanche', 'BSC']
+          : ['Solana', 'Polkadot', 'Cardano', 'NEAR'],
+        balances: [], // TODO: Fetch real balances from chains
+        createdAt: new Date().toISOString(),
+      }));
+
+      setWallets(formattedWallets);
     } catch (error) {
-      console.error('Failed to load wallets:', error);
+      console.error('Failed to load wallets from blockchain:', error);
+
+      // Fall back to mock data if blockchain fetch fails
+      try {
+        const data = await dwalletAPI.getDWallets();
+        setWallets(data);
+      } catch (fallbackError) {
+        console.error('Fallback also failed:', fallbackError);
+      }
     } finally {
       setLoading(false);
     }
