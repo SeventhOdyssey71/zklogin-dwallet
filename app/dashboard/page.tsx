@@ -5,6 +5,8 @@ import { motion } from 'framer-motion';
 import Link from 'next/link';
 import { Wallet, TrendingUp, Activity, Plus, ArrowUpRight, Loader2 } from 'lucide-react';
 import { dwalletAPI } from '@/lib/api/dwallet';
+import { getDWalletsFromBlockchain } from '@/lib/api/blockchainDwallet';
+import { useCurrentAccount } from '@mysten/dapp-kit';
 import { useWalletStore } from '@/lib/store/walletStore';
 import { DWallet } from '@/lib/types/dwallet';
 import { BentoCard } from '@/components/ui/BentoCard';
@@ -12,24 +14,59 @@ import { BentoCard } from '@/components/ui/BentoCard';
 export default function DashboardPage() {
   const { wallets, setWallets, isLoading, setLoading } = useWalletStore();
   const [totalValue, setTotalValue] = useState(0);
+  const account = useCurrentAccount();
 
   useEffect(() => {
-    loadWallets();
-  }, []);
+    if (account) {
+      loadWallets();
+    }
+  }, [account]);
 
   const loadWallets = async () => {
+    if (!account) {
+      console.log('No wallet connected');
+      return;
+    }
+
     setLoading(true);
     try {
-      const data = await dwalletAPI.getDWallets();
-      setWallets(data);
+      console.log('📡 Fetching dWallets for address:', account.address);
 
-      // Calculate total portfolio value
-      const total = data.reduce((sum, wallet) => {
-        return sum + wallet.balances.reduce((wSum, balance) => wSum + balance.usdValue, 0);
-      }, 0);
-      setTotalValue(total);
+      // Fetch dWallets directly from blockchain
+      const blockchainWallets = await getDWalletsFromBlockchain(account.address);
+
+      console.log('✅ Found', blockchainWallets.length, 'dWallets');
+
+      // Convert to DWallet format for display
+      const formattedWallets: DWallet[] = blockchainWallets.map((wallet) => ({
+        id: wallet.id,
+        name: `dWallet ${wallet.id.substring(0, 8)}...`,
+        type: wallet.curve === 0 ? 'ECDSA' : 'EdDSA',
+        curve: wallet.curve === 0 ? 'SECP256K1' : 'ED25519',
+        publicKey: 'pending', // TODO: Extract from dWallet public key commitment
+        status: wallet.state === 'Active' ? 'ACTIVE' : wallet.state === 'AwaitingNetworkDKGVerification' ? 'PENDING' : 'INACTIVE',
+        compatibleChains: wallet.curve === 0
+          ? ['Bitcoin', 'Ethereum', 'Polygon', 'Avalanche', 'BSC']
+          : ['Solana', 'Polkadot', 'Cardano', 'NEAR'],
+        balances: [], // TODO: Fetch real balances from chains
+        createdAt: new Date().toISOString(),
+      }));
+
+      setWallets(formattedWallets);
+      setTotalValue(0); // TODO: Calculate from real balances
     } catch (error) {
       console.error('Failed to load wallets:', error);
+      // Fall back to mock data if blockchain fetch fails
+      try {
+        const data = await dwalletAPI.getDWallets();
+        setWallets(data);
+        const total = data.reduce((sum, wallet) => {
+          return sum + wallet.balances.reduce((wSum, balance) => wSum + balance.usdValue, 0);
+        }, 0);
+        setTotalValue(total);
+      } catch (fallbackError) {
+        console.error('Fallback also failed:', fallbackError);
+      }
     } finally {
       setLoading(false);
     }
