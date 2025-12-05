@@ -2,6 +2,7 @@
 
 import { ThemeProvider } from 'next-themes';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { SuiWalletProvider } from '@/lib/providers/SuiWalletProvider';
 import { ReactNode, useState } from 'react';
 
 export function Providers({ children }: { children: ReactNode }) {
@@ -17,7 +18,9 @@ export function Providers({ children }: { children: ReactNode }) {
   return (
     <ThemeProvider attribute="class" defaultTheme="dark" enableSystem>
       <QueryClientProvider client={queryClient}>
-        {children}
+        <SuiWalletProvider>
+          {children}
+        </SuiWalletProvider>
       </QueryClientProvider>
     </ThemeProvider>
   );
