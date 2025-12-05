@@ -9,6 +9,8 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@ika.xyz/ika-wasm": "^0.2.1",
+    "@ika.xyz/sdk": "^0.2.3",
     "@mysten/dapp-kit": "^0.19.11",
     "@tanstack/react-query": "^5.90.12",
     "framer-motion": "^12.23.25",

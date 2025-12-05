@@ -123,22 +123,26 @@ export function ConnectWalletCompact() {
   console.log('✅ Rendering connected state with address:', account.address.slice(0, 10) + '...');
 
   return (
-    <div className="flex items-center gap-2">
+    <motion.div
+      initial={{ opacity: 0, scale: 0.95 }}
+      animate={{ opacity: 1, scale: 1 }}
+      className="flex items-center gap-2"
+    >
       {/* Connected Address */}
-      <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-zinc-100 dark:bg-zinc-800 text-sm">
-        <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-        <code className="font-mono text-xs">
-          {account.address.slice(0, 4)}...{account.address.slice(-3)}
+      <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 shadow-sm">
+        <div className="w-2 h-2 rounded-full bg-green-500" />
+        <code className="font-mono text-sm">
+          {account.address.slice(0, 6)}...{account.address.slice(-4)}
         </code>
         <button
           onClick={copyAddress}
-          className="p-1 hover:bg-zinc-200 dark:hover:bg-zinc-700 rounded transition-colors"
+          className="p-1 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded transition-colors"
           title="Copy address"
         >
           {copied ? (
             <Check className="w-3 h-3 text-green-600" />
           ) : (
-            <Copy className="w-3 h-3" />
+            <Copy className="w-3 h-3 text-zinc-500" />
           )}
         </button>
       </div>
@@ -146,12 +150,12 @@ export function ConnectWalletCompact() {
       {/* Disconnect Button */}
       <button
         onClick={handleDisconnect}
-        className="p-1.5 rounded-full bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 hover:bg-red-200 dark:hover:bg-red-900/50 transition-colors"
+        className="p-2 rounded-full bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 shadow-sm hover:bg-red-50 dark:hover:bg-red-900/20 hover:border-red-300 dark:hover:border-red-700 transition-colors"
         title="Disconnect wallet"
       >
-        <LogOut className="w-3 h-3" />
+        <LogOut className="w-4 h-4 text-zinc-600 dark:text-zinc-400 hover:text-red-600 dark:hover:text-red-400" />
       </button>
-    </div>
+    </motion.div>
   );
 }
 

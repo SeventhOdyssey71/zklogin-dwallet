@@ -9,6 +9,7 @@ import { Transaction } from '@mysten/sui/transactions';
 import { dwalletAPI } from '@/lib/api/dwallet';
 import { useWalletStore } from '@/lib/store/walletStore';
 import { DWalletType } from '@/lib/types/dwallet';
+import { IkaClient, IkaTransaction, Curve, prepareDKGAsync, UserShareEncryptionKeys, coordinatorTransactions, getNetworkConfig } from '@ika.xyz/sdk';
 
 type Step = 0 | 1 | 2 | 3 | 4;
 
@@ -50,63 +51,143 @@ export default function CreatePage() {
     setCreationError(null);
 
     try {
-      // Step 1: Get IKA and SUI coins for gas
-      console.log('🪙 Fetching coins for dWallet creation...');
+      console.log('🚀 Starting browser-based dWallet creation with Ika SDK...');
+      console.log('👛 Wallet address:', account.address);
 
-      const [ikaCoins, suiCoins] = await Promise.all([
-        suiClient.getCoins({
-          owner: account.address,
-          coinType: '0x0627ebf47e9ba67075e68da71e17846aaf29bdb5fd5c34bd74a05fcef8a69b7c::ika::IKA',
-        }),
-        suiClient.getCoins({
-          owner: account.address,
-          coinType: '0x2::sui::SUI',
-        }),
-      ]);
+      // Step 1: Get network config and initialize Ika Client
+      const networkConfig = getNetworkConfig('testnet');
+      console.log('📋 Network config:', networkConfig);
+
+      const ikaClient = new IkaClient({
+        suiClient: suiClient,
+        config: networkConfig,
+      });
+
+      console.log('✅ IkaClient initialized for testnet');
+
+      // Step 2: Get IKA and SUI coins
+      const packageId = process.env.NEXT_PUBLIC_IKA_PACKAGE_ID || '0x1f26bb2f711ff82dcda4d02c77d5123089cb7f8418751474b9fb744ce031526a';
+      const ikaCoins = await suiClient.getCoins({
+        owner: account.address,
+        coinType: `${packageId}::ika::IKA`,
+      });
 
       if (ikaCoins.data.length === 0) {
         throw new Error('No IKA tokens found. Get IKA from https://faucet.ika.xyz/');
       }
 
-      if (suiCoins.data.length === 0) {
-        throw new Error('No SUI tokens found for gas fees');
-      }
-
-      // Get the largest IKA coin
       const largestIkaCoin = ikaCoins.data.reduce((prev, current) =>
         (BigInt(current.balance) > BigInt(prev.balance)) ? current : prev
       );
 
-      console.log('✅ Found IKA coin:', largestIkaCoin.coinObjectId);
-      console.log('💰 IKA balance:', largestIkaCoin.balance);
+      console.log('💰 IKA coin found:', largestIkaCoin.coinObjectId, 'balance:', largestIkaCoin.balance);
 
-      // Step 2: Build dWallet creation transaction
-      console.log('🏗️ Building dWallet creation transaction...');
+      // Step 3: Determine curve from wallet type
+      const curve = walletType === 'ECDSA' ? Curve.SECP256K1 : Curve.ED25519;
+      console.log('📐 Using curve:', curve);
 
+      // Step 4: Generate encryption keypair for user share
+      // In a real app, this should be derived from user's wallet or stored securely
+      // For now, we'll generate a random seed
+      const randomSeed = new Uint8Array(32);
+      crypto.getRandomValues(randomSeed);
+
+      const userShareEncryptionKeys = await UserShareEncryptionKeys.fromRootSeedKey(
+        randomSeed,
+        curve
+      );
+
+      console.log('🔐 Generated encryption keys for user share');
+      console.log('🔑 Encryption key address:', userShareEncryptionKeys.getSuiAddress());
+
+      // Step 5: Create transaction with session identifier
       const tx = new Transaction();
       tx.setGasBudget(100000000); // 0.1 SUI
 
       const ikaCoin = tx.object(largestIkaCoin.coinObjectId);
+      const suiCoin = tx.gas;
 
-      // Determine curve and algorithm based on wallet type
-      const curve = walletType === 'ECDSA' ? 'SECP256K1' : 'ED25519';
-      const signatureAlgorithm = walletType === 'ECDSA' ? 'ECDSA' : 'EdDSA';
+      // Register session identifier
+      const sessionIdentifierBytes = new TextEncoder().encode(`dwallet-creation-${Date.now()}`);
+      const coordinatorObjectRef = tx.sharedObjectRef({
+        objectId: networkConfig.objects.ikaDWalletCoordinator.objectID,
+        initialSharedVersion: networkConfig.objects.ikaDWalletCoordinator.initialSharedVersion,
+        mutable: true,
+      });
+      const sessionIdentifier = coordinatorTransactions.registerSessionIdentifier(
+        networkConfig,
+        coordinatorObjectRef,
+        sessionIdentifierBytes,
+        tx
+      );
 
-      console.log(`📝 Creating ${walletType} dWallet with ${curve} curve`);
+      console.log('📝 Session identifier registered');
 
-      // Call the dWallet creation function from Ika package
-      // Note: This requires the Ika package to be available on-chain
-      // The actual moveCall will depend on the Ika SDK structure
-      tx.moveCall({
-        target: `${process.env.NEXT_PUBLIC_IKA_PACKAGE_ID || '0x0627ebf47e9ba67075e68da71e17846aaf29bdb5fd5c34bd74a05fcef8a69b7c'}::dwallet::create_dwallet`,
-        arguments: [
-          tx.pure(curve),
-          tx.pure(signatureAlgorithm),
-          ikaCoin,
-        ],
+      // Step 6: Create IkaTransaction wrapper
+      const ikaTx = new IkaTransaction({
+        ikaClient,
+        transaction: tx,
+        userShareEncryptionKeys,
       });
 
-      // Step 3: User signs and executes transaction
+      // Step 7: Check if user has encryption key registered, if not register it
+      console.log('🔍 Checking for existing encryption key...');
+      let activeEncryptionKeyId;
+      try {
+        activeEncryptionKeyId = await ikaClient.getActiveEncryptionKeyId(account.address, curve);
+        console.log('✅ Found existing encryption key:', activeEncryptionKeyId);
+      } catch (error) {
+        console.log('📝 No encryption key found, registering new one...');
+        await ikaTx.registerEncryptionKey({ curve });
+        // After registering, we need to execute this transaction first before creating dWallet
+        console.log('⚠️ Need to register encryption key in a separate transaction first');
+
+        // Sign and execute the encryption key registration transaction
+        signAndExecuteTransaction(
+          { transaction: tx },
+          {
+            onSuccess: async (result) => {
+              console.log('✅ Encryption key registered successfully!');
+              console.log('🔄 Please try creating the dWallet again');
+              setCreationError('Encryption key registered. Please click "Create dWallet" again to continue.');
+              setIsCreating(false);
+            },
+            onError: (error) => {
+              console.error('❌ Failed to register encryption key:', error);
+              setCreationError('Failed to register encryption key: ' + error.message);
+              setIsCreating(false);
+            },
+          }
+        );
+        return; // Exit early, user needs to try again after key registration
+      }
+
+      // Step 8: Prepare DKG (Distributed Key Generation) parameters
+      console.log('🔢 Preparing DKG cryptographic parameters...');
+
+      const dkgRequestInput = await prepareDKGAsync(
+        ikaClient,
+        curve,
+        userShareEncryptionKeys,
+        sessionIdentifierBytes,
+        account.address
+      );
+
+      console.log('✅ DKG parameters prepared');
+
+      // Step 9: Request dWallet DKG
+      const dwalletResult = await ikaTx.requestDWalletDKG({
+        dkgRequestInput,
+        ikaCoin,
+        suiCoin,
+        sessionIdentifier,
+        dwalletNetworkEncryptionKeyId: activeEncryptionKeyId,
+        curve,
+      });
+
+      console.log('🏗️ dWallet DKG transaction built');
+
+      // Step 10: Sign and execute transaction
       console.log('✍️ Requesting signature from user...');
 
       signAndExecuteTransaction(
@@ -122,7 +203,7 @@ export default function CreatePage() {
             let dwalletId = null;
             if (result.objectChanges) {
               for (const change of result.objectChanges) {
-                if (change.type === 'created' && change.objectType?.includes('dWallet')) {
+                if (change.type === 'created' && change.objectType?.includes('DWalletCap')) {
                   dwalletId = change.objectId;
                   break;
                 }
@@ -135,9 +216,8 @@ export default function CreatePage() {
 
             console.log('🆔 New dWallet ID:', dwalletId);
 
-            // Fetch the created dWallet details
-            const wallet = await dwalletAPI.getDWallets();
-            const newWallet = wallet.find(w => w.id === dwalletId) || {
+            // Create wallet object for UI
+            const newWallet = {
               id: dwalletId,
               name: walletName,
               type: walletType,
@@ -155,6 +235,8 @@ export default function CreatePage() {
             addWallet(newWallet);
             setStep(4);
             setIsCreating(false);
+
+            console.log('🎉 dWallet created successfully in browser!');
           },
           onError: (error) => {
             console.error('❌ Transaction failed:', error);
@@ -602,7 +684,25 @@ export default function CreatePage() {
                     <div className="flex items-start gap-3">
                       <AlertCircle className="w-5 h-5 text-red-600 dark:text-red-400 flex-shrink-0 mt-0.5" />
                       <div className="text-sm text-red-900 dark:text-red-100">
-                        <strong>Error:</strong> {creationError}
+                        <div className="mb-2">
+                          <strong>Error:</strong> {creationError}
+                        </div>
+                        {creationError.includes('IKA tokens') && (
+                          <div className="mt-2 p-3 bg-white dark:bg-zinc-800 rounded-lg border border-red-200 dark:border-red-800">
+                            <div className="font-medium mb-1">Get IKA tokens:</div>
+                            <a
+                              href="https://faucet.ika.xyz/"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-purple-600 dark:text-purple-400 hover:underline font-medium"
+                            >
+                              https://faucet.ika.xyz/ →
+                            </a>
+                            <div className="text-xs text-zinc-600 dark:text-zinc-400 mt-1">
+                              Connect your wallet and request IKA tokens
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>
