@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import Link from 'next/link';
 import { Menu, X, Wallet, LayoutDashboard, Plus, History } from 'lucide-react';
+import { ConnectWalletCompact } from '@/components/wallet/ConnectWallet';
 
 const navItems = [
   { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
@@ -31,6 +32,11 @@ export function Navigation() {
           <Menu className="w-6 h-6 text-zinc-900 dark:text-white" />
         )}
       </motion.button>
+
+      {/* Wallet Connect Button */}
+      <div className="fixed top-8 right-8 z-50">
+        <ConnectWalletCompact />
+      </div>
 
       {/* Full-screen overlay menu */}
       <AnimatePresence>
