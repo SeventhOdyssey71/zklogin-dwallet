@@ -18,6 +18,7 @@ import {
   Clock
 } from 'lucide-react';
 import { dwalletAPI } from '@/lib/api/dwallet';
+import { getDWalletById } from '@/lib/api/blockchainDwallet';
 import { DWallet } from '@/lib/types/dwallet';
 import { BentoCard } from '@/components/ui/BentoCard';
 
@@ -38,13 +39,43 @@ export default function WalletDetailPage() {
   const loadWallet = async () => {
     setIsLoading(true);
     try {
-      const data = await dwalletAPI.getDWallet(walletId);
-      setWallet(data);
-      if (data?.balances.length) {
-        setSelectedChain(data.balances[0].chain);
+      console.log('📡 Fetching dWallet from blockchain:', walletId);
+
+      // Fetch from blockchain first
+      const blockchainData = await getDWalletById(walletId);
+
+      const walletData: DWallet = {
+        id: walletId,
+        name: `dWallet ${walletId.substring(0, 8)}...`,
+        type: blockchainData.curve === 0 ? 'ECDSA' : 'EdDSA',
+        curve: blockchainData.curve === 0 ? 'SECP256K1' : 'ED25519',
+        publicKey: blockchainData.publicKey || 'pending',
+        status: blockchainData.state === 'Active' ? 'ACTIVE' : blockchainData.state === 'AwaitingNetworkDKGVerification' ? 'PENDING' : 'INACTIVE',
+        compatibleChains: blockchainData.curve === 0
+          ? ['Bitcoin', 'Ethereum', 'Polygon', 'Avalanche', 'BSC']
+          : ['Solana', 'Polkadot', 'Cardano', 'NEAR'],
+        balances: [], // TODO: Fetch real balances
+        createdAt: blockchainData.createdAt || new Date().toISOString(),
+      };
+
+      setWallet(walletData);
+
+      if (walletData.compatibleChains.length > 0) {
+        setSelectedChain(walletData.compatibleChains[0]);
       }
     } catch (error) {
-      console.error('Failed to load wallet:', error);
+      console.error('Failed to load wallet from blockchain:', error);
+
+      // Fallback to API
+      try {
+        const data = await dwalletAPI.getDWallet(walletId);
+        setWallet(data);
+        if (data?.balances.length) {
+          setSelectedChain(data.balances[0].chain);
+        }
+      } catch (apiError) {
+        console.error('Fallback API also failed:', apiError);
+      }
     } finally {
       setIsLoading(false);
     }
