@@ -57,19 +57,25 @@ export default function WalletsPage() {
       console.log('✅ Found', blockchainWallets.length, 'dWallets');
 
       // Convert to DWallet format for display
-      const formattedWallets: DWallet[] = blockchainWallets.map((wallet) => ({
-        id: wallet.id,
-        name: `dWallet ${wallet.id.substring(0, 8)}...`,
-        type: wallet.curve === 0 ? 'ECDSA' : 'EdDSA',
-        curve: wallet.curve === 0 ? 'SECP256K1' : 'ED25519',
-        publicKey: 'pending', // TODO: Extract from dWallet public key commitment
-        status: wallet.state === 'Active' ? 'ACTIVE' : wallet.state === 'AwaitingNetworkDKGVerification' ? 'PENDING' : 'INACTIVE',
-        compatibleChains: wallet.curve === 0
-          ? ['Bitcoin', 'Ethereum', 'Polygon', 'Avalanche', 'BSC']
-          : ['Solana', 'Polkadot', 'Cardano', 'NEAR'],
-        balances: [], // TODO: Fetch real balances from chains
-        createdAt: new Date().toISOString(),
-      }));
+      const formattedWallets: DWallet[] = blockchainWallets.map((wallet) => {
+        // Try to get saved wallet name from localStorage
+        const savedName = localStorage.getItem(`dwallet_name_${wallet.id}`);
+        const walletName = savedName || `dWallet ${wallet.id.substring(0, 8)}...`;
+
+        return {
+          id: wallet.id,
+          name: walletName,
+          type: wallet.curve === 0 ? 'ECDSA' : 'EdDSA',
+          curve: wallet.curve === 0 ? 'SECP256K1' : 'ED25519',
+          publicKey: 'pending', // TODO: Extract from dWallet public key commitment
+          status: wallet.state === 'Active' ? 'ACTIVE' : wallet.state === 'AwaitingNetworkDKGVerification' ? 'PENDING' : 'INACTIVE',
+          compatibleChains: wallet.curve === 0
+            ? ['Bitcoin', 'Ethereum', 'Polygon', 'Avalanche', 'BSC']
+            : ['Solana', 'Polkadot', 'Cardano', 'NEAR'],
+          balances: [], // TODO: Fetch real balances from chains
+          createdAt: new Date().toISOString(),
+        };
+      });
 
       setWallets(formattedWallets);
     } catch (error) {

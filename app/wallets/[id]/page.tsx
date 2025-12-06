@@ -16,7 +16,9 @@ import {
   TrendingUp,
   Activity,
   Clock,
-  Zap
+  Zap,
+  Edit2,
+  X
 } from 'lucide-react';
 import { useCurrentAccount, useSuiClient, useSignAndExecuteTransaction } from '@mysten/dapp-kit';
 import { Transaction } from '@mysten/sui/transactions';
@@ -40,6 +42,8 @@ export default function WalletDetailPage() {
   const [activationError, setActivationError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [selectedChain, setSelectedChain] = useState<string | null>(null);
+  const [isEditingName, setIsEditingName] = useState(false);
+  const [editedName, setEditedName] = useState('');
 
   useEffect(() => {
     loadWallet();
@@ -86,6 +90,7 @@ export default function WalletDetailPage() {
       };
 
       setWallet(walletData);
+      setEditedName(walletName);
 
       if (walletData.compatibleChains.length > 0) {
         setSelectedChain(walletData.compatibleChains[0]);
@@ -97,6 +102,7 @@ export default function WalletDetailPage() {
       try {
         const data = await dwalletAPI.getDWallet(walletId);
         setWallet(data);
+        setEditedName(data.name);
         if (data?.balances.length) {
           setSelectedChain(data.balances[0].chain);
         }
@@ -106,6 +112,15 @@ export default function WalletDetailPage() {
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const handleSaveName = () => {
+    if (!editedName.trim()) return;
+
+    localStorage.setItem(`dwallet_name_${walletId}`, editedName);
+    setWallet(prev => prev ? { ...prev, name: editedName } : null);
+    setIsEditingName(false);
+    console.log('💾 Wallet name updated:', editedName);
   };
 
   const handleActivate = async () => {
@@ -426,7 +441,49 @@ export default function WalletDetailPage() {
                 <Wallet className="w-10 h-10 text-white" />
               </div>
               <div>
-                <h1 className="text-5xl md:text-6xl font-black mb-2">{wallet.name}</h1>
+                <div className="flex items-center gap-3 mb-2">
+                  {isEditingName ? (
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        value={editedName}
+                        onChange={(e) => setEditedName(e.target.value)}
+                        className="text-5xl md:text-6xl font-black bg-transparent border-b-2 border-purple-500 focus:outline-none"
+                        autoFocus
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') handleSaveName();
+                          if (e.key === 'Escape') setIsEditingName(false);
+                        }}
+                      />
+                      <button
+                        onClick={handleSaveName}
+                        className="p-2 rounded-lg bg-green-500 hover:bg-green-600 text-white"
+                      >
+                        <Check className="w-5 h-5" />
+                      </button>
+                      <button
+                        onClick={() => {
+                          setIsEditingName(false);
+                          setEditedName(wallet.name);
+                        }}
+                        className="p-2 rounded-lg bg-zinc-500 hover:bg-zinc-600 text-white"
+                      >
+                        <X className="w-5 h-5" />
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <h1 className="text-5xl md:text-6xl font-black">{wallet.name}</h1>
+                      <button
+                        onClick={() => setIsEditingName(true)}
+                        className="p-2 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
+                        title="Edit wallet name"
+                      >
+                        <Edit2 className="w-5 h-5" />
+                      </button>
+                    </>
+                  )}
+                </div>
                 <div className="flex items-center gap-3">
                   <span className={`px-3 py-1 rounded-full text-sm font-medium ${
                     wallet.type === 'ECDSA'
