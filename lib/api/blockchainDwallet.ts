@@ -4,7 +4,7 @@
  */
 
 import { SuiClient } from '@mysten/sui/client';
-import { IkaClient, getNetworkConfig } from '@ika.xyz/sdk';
+import { IkaClient, getNetworkConfig, publicKeyFromDWalletOutput, Curve } from '@ika.xyz/sdk';
 
 const TESTNET_RPC = 'https://fullnode.testnet.sui.io:443';
 
@@ -93,29 +93,41 @@ export async function getDWalletById(dWalletId: string) {
 
     console.log('🔍 dWallet state:', dWallet.state.$kind);
 
-    // Extract public key from state
+    // Extract public key using official Ika SDK method
     let publicKey: string | undefined = undefined;
 
-    // Extract public key based on dWallet state
+    // Extract public_output bytes from state
     if (dWallet.state.$kind === 'AwaitingKeyHolderSignature') {
       const stateData = dWallet.state as any;
-      const pubKeyBytes = stateData.AwaitingKeyHolderSignature?.public_output;
-      console.log('📋 Has public_output:', !!pubKeyBytes, 'Is array:', Array.isArray(pubKeyBytes));
-      if (pubKeyBytes && Array.isArray(pubKeyBytes)) {
-        publicKey = '0x' + Buffer.from(pubKeyBytes).toString('hex');
-        console.log('✅ Extracted public key length:', publicKey.length);
+      const pubOutputBytes = stateData.AwaitingKeyHolderSignature?.public_output;
+
+      if (pubOutputBytes && Array.isArray(pubOutputBytes)) {
+        // Use official Ika SDK method to extract actual public key
+        const curve = dWallet.curve === 0 ? Curve.SECP256K1 : Curve.ED25519;
+        const actualPublicKey = await publicKeyFromDWalletOutput(
+          curve,
+          Uint8Array.from(pubOutputBytes)
+        );
+        publicKey = '0x' + Buffer.from(actualPublicKey).toString('hex');
+        console.log('✅ Extracted public key using Ika SDK');
       }
     } else if (dWallet.state.$kind === 'Active') {
       const stateData = dWallet.state as any;
-      const pubKeyBytes = stateData.Active?.public_output;
-      console.log('📋 Has public_output:', !!pubKeyBytes, 'Is array:', Array.isArray(pubKeyBytes));
-      if (pubKeyBytes && Array.isArray(pubKeyBytes)) {
-        publicKey = '0x' + Buffer.from(pubKeyBytes).toString('hex');
-        console.log('✅ Extracted public key length:', publicKey.length);
+      const pubOutputBytes = stateData.Active?.public_output;
+
+      if (pubOutputBytes && Array.isArray(pubOutputBytes)) {
+        // Use official Ika SDK method to extract actual public key
+        const curve = dWallet.curve === 0 ? Curve.SECP256K1 : Curve.ED25519;
+        const actualPublicKey = await publicKeyFromDWalletOutput(
+          curve,
+          Uint8Array.from(pubOutputBytes)
+        );
+        publicKey = '0x' + Buffer.from(actualPublicKey).toString('hex');
+        console.log('✅ Extracted public key using Ika SDK');
       }
     }
 
-    console.log('🔑 Final public key:', publicKey ? publicKey.substring(0, 50) + '...' : 'undefined');
+    console.log('🔑 Public key length:', publicKey?.length);
 
     return {
       id: dWalletId,
