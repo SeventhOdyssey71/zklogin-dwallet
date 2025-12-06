@@ -15,8 +15,12 @@ import {
   Check,
   TrendingUp,
   Activity,
-  Clock
+  Clock,
+  Zap
 } from 'lucide-react';
+import { useCurrentAccount, useSuiClient, useSignAndExecuteTransaction } from '@mysten/dapp-kit';
+import { Transaction } from '@mysten/sui/transactions';
+import { IkaClient, IkaTransaction, UserShareEncryptionKeys, getNetworkConfig, Curve, prepareDKGAsync } from '@ika.xyz/sdk';
 import { dwalletAPI } from '@/lib/api/dwallet';
 import { getDWalletById } from '@/lib/api/blockchainDwallet';
 import { DWallet } from '@/lib/types/dwallet';
@@ -26,9 +30,14 @@ export default function WalletDetailPage() {
   const params = useParams();
   const router = useRouter();
   const walletId = params.id as string;
+  const account = useCurrentAccount();
+  const suiClient = useSuiClient();
+  const { mutate: signAndExecuteTransaction } = useSignAndExecuteTransaction();
 
   const [wallet, setWallet] = useState<DWallet | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [isActivating, setIsActivating] = useState(false);
+  const [activationError, setActivationError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [selectedChain, setSelectedChain] = useState<string | null>(null);
 
@@ -44,13 +53,31 @@ export default function WalletDetailPage() {
       // Fetch from blockchain first
       const blockchainData = await getDWalletById(walletId);
 
+      console.log('🔍 Blockchain state:', blockchainData.state);
+
+      // Determine wallet status based on blockchain state
+      // AwaitingKeyHolderSignature needs activation via acceptEncryptedUserShare
+      let status: 'ACTIVE' | 'PENDING' | 'INACTIVE' = 'INACTIVE';
+      if (blockchainData.state === 'Active') {
+        status = 'ACTIVE';
+      } else if (
+        blockchainData.state === 'AwaitingNetworkDKGVerification' ||
+        blockchainData.state === 'AwaitingKeyHolderSignature'
+      ) {
+        status = 'PENDING';
+      }
+
+      // Try to get saved wallet name from localStorage
+      const savedName = localStorage.getItem(`dwallet_name_${walletId}`);
+      const walletName = savedName || `dWallet ${walletId.substring(0, 8)}...`;
+
       const walletData: DWallet = {
         id: walletId,
-        name: `dWallet ${walletId.substring(0, 8)}...`,
+        name: walletName,
         type: blockchainData.curve === 0 ? 'ECDSA' : 'EdDSA',
         curve: blockchainData.curve === 0 ? 'SECP256K1' : 'ED25519',
         publicKey: blockchainData.publicKey || 'pending',
-        status: blockchainData.state === 'Active' ? 'ACTIVE' : blockchainData.state === 'AwaitingNetworkDKGVerification' ? 'PENDING' : 'INACTIVE',
+        status,
         compatibleChains: blockchainData.curve === 0
           ? ['Bitcoin', 'Ethereum', 'Polygon', 'Avalanche', 'BSC']
           : ['Solana', 'Polkadot', 'Cardano', 'NEAR'],
@@ -78,6 +105,223 @@ export default function WalletDetailPage() {
       }
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleActivate = async () => {
+    if (!account || !wallet) return;
+
+    setIsActivating(true);
+    setActivationError(null);
+
+    try {
+      console.log('🔄 Activating dWallet:', walletId);
+
+      // Initialize IkaClient
+      const networkConfig = getNetworkConfig('testnet');
+      const ikaClient = new IkaClient({
+        suiClient,
+        config: networkConfig,
+      });
+      await ikaClient.initialize();
+
+      // Get full dWallet details from blockchain
+      const dWallet = await ikaClient.getDWallet(walletId);
+      console.log('📦 dWallet state:', dWallet.state.$kind);
+
+      // Check if dWallet is in a state that requires acceptEncryptedUserShare activation
+      const stateKind = dWallet.state.$kind;
+      console.log('📋 Full dWallet state:', JSON.stringify(dWallet.state, null, 2));
+      console.log('📋 Full dWallet object:', JSON.stringify(dWallet, null, 2));
+
+      // Both AwaitingNetworkDKGVerification and AwaitingKeyHolderSignature need activation
+      if (stateKind !== 'AwaitingNetworkDKGVerification' && stateKind !== 'AwaitingKeyHolderSignature') {
+        throw new Error(`This dWallet is in "${stateKind}" state. Activation is only for wallets in "AwaitingNetworkDKGVerification" or "AwaitingKeyHolderSignature" state.`);
+      }
+
+      // Get encrypted user secret key share ID from the dWallet's encrypted_user_secret_key_shares table
+      const encryptedSharesTable = (dWallet as any).encrypted_user_secret_key_shares;
+      if (!encryptedSharesTable || encryptedSharesTable.size === '0') {
+        throw new Error('No encrypted user secret key shares found in dWallet');
+      }
+
+      // The share ID is in the table, we need to query it
+      const encryptedShareTableId = encryptedSharesTable.id.id;
+      console.log('📦 Encrypted shares table ID:', encryptedShareTableId);
+
+      // Get the first encrypted share from the table
+      // We need to query the Sui dynamic field to get the actual share ID
+      const dynamicFields = await suiClient.getDynamicFields({
+        parentId: encryptedShareTableId,
+      });
+
+      console.log('🔍 Dynamic fields:', dynamicFields);
+
+      if (!dynamicFields.data || dynamicFields.data.length === 0) {
+        throw new Error('No encrypted user secret key shares found in table');
+      }
+
+      // Get the first share's object ID
+      const firstShareObjectId = dynamicFields.data[0].objectId;
+      console.log('🔑 First encrypted share object ID:', firstShareObjectId);
+
+      // Get the encrypted share object
+      const encryptedShareObject = await suiClient.getObject({
+        id: firstShareObjectId,
+        options: { showContent: true },
+      });
+
+      console.log('📋 Encrypted share object:', JSON.stringify(encryptedShareObject, null, 2));
+
+      // Extract the share ID from the object content
+      const shareContent = encryptedShareObject.data?.content as any;
+      console.log('🔍 Share content type:', shareContent?.dataType);
+      console.log('🔍 Share content fields:', shareContent?.fields);
+
+      // Try multiple paths to find the ID
+      let encryptedUserSecretKeyShareId =
+        shareContent?.fields?.value?.fields?.id?.id ||
+        shareContent?.fields?.value?.id?.id ||
+        shareContent?.fields?.id?.id ||
+        shareContent?.fields?.name; // Dynamic field key might be the ID
+
+      // If the name field is the encryption key address, the value might contain the share ID
+      if (!encryptedUserSecretKeyShareId && shareContent?.fields?.value) {
+        const valueFields = shareContent.fields.value.fields || shareContent.fields.value;
+        console.log('🔍 Value fields:', JSON.stringify(valueFields, null, 2));
+
+        // The share ID might be the object ID itself
+        encryptedUserSecretKeyShareId = firstShareObjectId;
+      }
+
+      if (!encryptedUserSecretKeyShareId) {
+        console.error('❌ Could not find share ID. Content structure:', shareContent);
+        throw new Error('Could not extract encrypted user secret key share ID from object. Check console for structure.');
+      }
+
+      console.log('✅ Encrypted user secret key share ID:', encryptedUserSecretKeyShareId);
+
+      // Retrieve session identifier from localStorage to regenerate USER's original DKG output
+      const sessionIdentifierKey = `dwallet_session_${walletId}`;
+      const sessionIdentifierJSON = localStorage.getItem(sessionIdentifierKey);
+
+      if (!sessionIdentifierJSON) {
+        throw new Error('Session identifier not found. This dWallet was created in a different browser session. Activation must be done immediately after creation.');
+      }
+
+      const sessionIdentifierArray = JSON.parse(sessionIdentifierJSON);
+      const sessionIdentifierBytes = new Uint8Array(sessionIdentifierArray);
+      console.log('📝 Retrieved session identifier from localStorage');
+
+      // Recreate UserShareEncryptionKeys using the SAME deterministic seed as during creation
+      const curve = dWallet.curve === 0 ? Curve.SECP256K1 : Curve.ED25519;
+      const encryptionSeed = new TextEncoder().encode(`ika-dwallet-${account.address}`);
+
+      console.log('🔐 Recreating encryption keys with deterministic seed for address:', account.address);
+
+      const userShareEncryptionKeys = await UserShareEncryptionKeys.fromRootSeedKey(encryptionSeed, curve);
+
+      console.log('🔑 Recreated encryption key address:', userShareEncryptionKeys.getSuiAddress());
+
+      // Regenerate USER's original DKG output (not the combined blockchain output)
+      console.log('🔐 Regenerating USER public output with session identifier...');
+      const dkgInput = await prepareDKGAsync(
+        ikaClient,
+        curve,
+        userShareEncryptionKeys,
+        sessionIdentifierBytes,
+        account.address
+      );
+
+      const userPublicOutputBytes = dkgInput.userPublicOutput;
+      console.log('✅ USER public output regenerated, length:', userPublicOutputBytes.length);
+      console.log('🔑 USER output (first 20 bytes):', Array.from(userPublicOutputBytes.slice(0, 20)));
+
+      // Also log the blockchain's combined output for comparison
+      const blockchainOutput = (dWallet.state as any)[stateKind]?.public_output;
+      if (blockchainOutput) {
+        console.log('🌐 Blockchain combined output length:', blockchainOutput.length);
+        console.log('🌐 Blockchain output (first 20 bytes):', Array.from(blockchainOutput.slice(0, 20)));
+      }
+
+      // Create transaction
+      const tx = new Transaction();
+      const ikaTx = new IkaTransaction({
+        ikaClient,
+        transaction: tx,
+        userShareEncryptionKeys,
+      });
+
+      // Call acceptEncryptedUserShare
+      console.log('📝 Accepting encrypted user share...');
+      console.log('🔍 dWallet curve:', dWallet.curve);
+      console.log('🔍 dWallet state kind:', dWallet.state.$kind);
+      console.log('🔍 Encrypted share ID:', encryptedUserSecretKeyShareId);
+      console.log('🔍 User public output length:', userPublicOutputBytes.length);
+
+      await ikaTx.acceptEncryptedUserShare({
+        dWallet: { ...dWallet, kind: 'zero-trust' } as any,
+        userPublicOutput: userPublicOutputBytes,
+        encryptedUserSecretKeyShareId,
+      });
+
+      tx.setGasBudget(50000000);
+
+      // Sign and execute transaction
+      console.log('✍️ Signing transaction...');
+      signAndExecuteTransaction(
+        {
+          transaction: tx,
+        },
+        {
+          onSuccess: async (result) => {
+            console.log('📜 Transaction submitted:', result.digest);
+
+            // Wait a moment for blockchain to index
+            await new Promise(resolve => setTimeout(resolve, 2000));
+
+            // Fetch transaction details to check if it actually succeeded
+            try {
+              const txDetails = await suiClient.getTransactionBlock({
+                digest: result.digest,
+                options: {
+                  showEffects: true,
+                },
+              });
+
+              const status = txDetails.effects?.status?.status;
+
+              if (status !== 'success') {
+                console.error('❌ Transaction failed on-chain:', txDetails.effects?.status);
+                const error = txDetails.effects?.status?.error || 'Transaction failed on-chain';
+                setActivationError(error);
+                setIsActivating(false);
+                return;
+              }
+
+              console.log('✅ Activation transaction successful!');
+
+              // Reload wallet to show updated state
+              await loadWallet();
+
+              setIsActivating(false);
+            } catch (error: any) {
+              console.error('❌ Error checking transaction status:', error);
+              setActivationError(error.message || 'Failed to verify transaction');
+              setIsActivating(false);
+            }
+          },
+          onError: (error) => {
+            console.error('❌ Activation failed:', error);
+            setActivationError(error.message || 'Failed to activate dWallet');
+            setIsActivating(false);
+          },
+        }
+      );
+    } catch (error: any) {
+      console.error('❌ Activation error:', error);
+      setActivationError(error.message || 'Failed to activate dWallet');
+      setIsActivating(false);
     }
   };
 
@@ -173,10 +417,97 @@ export default function WalletDetailPage() {
                     }`} />
                     {wallet.status}
                   </span>
+
+                  {/* Activate Button - Show only when wallet is PENDING (AwaitingNetworkDKGVerification) */}
+                  {wallet.status === 'PENDING' && account && (
+                    <motion.button
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.95 }}
+                      onClick={handleActivate}
+                      disabled={isActivating}
+                      className={`px-4 py-2 rounded-full font-bold cursor-hover flex items-center gap-2 ${
+                        isActivating
+                          ? 'bg-zinc-300 dark:bg-zinc-700 text-zinc-500 cursor-not-allowed'
+                          : 'bg-gradient-to-r from-purple-600 to-pink-600 text-white'
+                      }`}
+                    >
+                      {isActivating ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          Activating...
+                        </>
+                      ) : (
+                        <>
+                          <Zap className="w-4 h-4" />
+                          Activate dWallet
+                        </>
+                      )}
+                    </motion.button>
+                  )}
                 </div>
               </div>
             </div>
           </motion.div>
+
+          {/* Activation Error Message */}
+          {activationError && (
+            <motion.div
+              initial={{ opacity: 0, y: -10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="mt-4 p-4 rounded-2xl bg-red-100 dark:bg-red-900/30 border border-red-200 dark:border-red-800"
+            >
+              <p className="text-red-600 dark:text-red-400 font-medium">
+                ❌ Activation Failed: {activationError}
+              </p>
+            </motion.div>
+          )}
+
+          {/* Prominent Activation Section - Only for AwaitingNetworkDKGVerification */}
+          {wallet.status === 'PENDING' && account && (
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.15 }}
+              className="mt-6"
+            >
+              <BentoCard className="bg-gradient-to-br from-purple-50 to-pink-50 dark:from-purple-900/20 dark:to-pink-900/20 border-2 border-purple-200 dark:border-purple-800">
+                <div className="flex items-center justify-between">
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2 mb-2">
+                      <Clock className="w-5 h-5 text-purple-600" />
+                      <h3 className="text-lg font-bold">Activation Required</h3>
+                    </div>
+                    <p className="text-sm text-zinc-600 dark:text-zinc-400">
+                      Your dWallet has been created but needs to be activated. Click the button to complete the setup and start using your dWallet.
+                    </p>
+                  </div>
+                  <motion.button
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    onClick={handleActivate}
+                    disabled={isActivating}
+                    className={`ml-4 px-6 py-3 rounded-full font-bold cursor-hover flex items-center gap-2 ${
+                      isActivating
+                        ? 'bg-zinc-300 dark:bg-zinc-700 text-zinc-500 cursor-not-allowed'
+                        : 'bg-gradient-to-r from-purple-600 to-pink-600 text-white shadow-lg'
+                    }`}
+                  >
+                    {isActivating ? (
+                      <>
+                        <Loader2 className="w-5 h-5 animate-spin" />
+                        Activating...
+                      </>
+                    ) : (
+                      <>
+                        <Zap className="w-5 h-5" />
+                        Activate Now
+                      </>
+                    )}
+                  </motion.button>
+                </div>
+              </BentoCard>
+            </motion.div>
+          )}
 
           {/* Wallet ID */}
           <motion.div
@@ -268,12 +599,13 @@ export default function WalletDetailPage() {
                     initial={{ opacity: 0, y: 20 }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ delay: index * 0.1 }}
+                    onClick={() => setSelectedChain(balance.chain)}
+                    className="cursor-pointer"
                   >
                     <BentoCard
-                      className={`cursor-hover ${
+                      className={`${
                         selectedChain === balance.chain ? 'ring-2 ring-purple-500' : ''
                       }`}
-                      onClick={() => setSelectedChain(balance.chain)}
                     >
                       <div className="flex items-center justify-between">
                         <div className="flex-1">
