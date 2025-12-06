@@ -13,6 +13,7 @@
     "@ika.xyz/sdk": "^0.2.3",
     "@mysten/dapp-kit": "^0.19.11",
     "@tanstack/react-query": "^5.90.12",
+    "ethers": "^6.16.0",
     "framer-motion": "^12.23.25",
     "lucide-react": "^0.555.0",
     "next": "16.0.7",
