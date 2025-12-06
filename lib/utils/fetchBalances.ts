@@ -2,7 +2,7 @@
  * Fetch real balances from blockchain testnets
  */
 
-import { TESTNET_CHAINS, SOLANA_TESTNET } from '../config/chains';
+import { TESTNET_CHAINS, SOLANA_TESTNET, POLKADOT_TESTNET, CARDANO_TESTNET, NEAR_TESTNET } from '../config/chains';
 
 /**
  * Convert hex string to decimal number (for wei to ETH conversion)
@@ -220,6 +220,160 @@ export async function fetchBitcoinBalance(address: string): Promise<{ balance: s
 }
 
 /**
+ * Fetch balance for Polkadot testnet (Westend)
+ */
+export async function fetchPolkadotBalance(address: string): Promise<{ balance: string; usdValue: number }> {
+  // Skip if address is invalid
+  if (!address || address === 'Invalid public key') {
+    console.log(`⏭️ Skipping Polkadot balance fetch for invalid address: ${address}`);
+    return {
+      balance: '0',
+      usdValue: 0,
+    };
+  }
+
+  try {
+    // Add timeout to fetch request
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+    const response = await fetch(POLKADOT_TESTNET.rpcUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'system_account',
+        params: [address],
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      throw new Error(`Polkadot RPC returned ${response.status}`);
+    }
+
+    const data = await response.json();
+
+    if (data.error) {
+      throw new Error(`Polkadot RPC error: ${data.error.message}`);
+    }
+
+    const balance = data.result?.data?.free || 0;
+    const balanceWND = (balance / 1e12).toFixed(6); // Convert to WND (Westend tokens)
+
+    console.log(`✅ Polkadot balance: ${balanceWND} WND`);
+
+    return {
+      balance: balanceWND,
+      usdValue: 0,
+    };
+  } catch (error) {
+    console.error('❌ Polkadot balance fetch failed:', error instanceof Error ? error.message : 'Unknown error');
+    return {
+      balance: '0',
+      usdValue: 0,
+    };
+  }
+}
+
+/**
+ * Fetch balance for Cardano testnet (Preview)
+ */
+export async function fetchCardanoBalance(address: string): Promise<{ balance: string; usdValue: number }> {
+  // Skip if address is invalid
+  if (!address || address === 'Invalid public key' || !address.startsWith('addr_test')) {
+    console.log(`⏭️ Skipping Cardano balance fetch for invalid address: ${address}`);
+    return {
+      balance: '0',
+      usdValue: 0,
+    };
+  }
+
+  try {
+    // Note: Blockfrost requires an API key, so this is a placeholder
+    // For now, return 0 until proper API integration
+    console.log(`⏭️ Cardano balance fetch requires Blockfrost API key (returning 0)`);
+
+    return {
+      balance: '0',
+      usdValue: 0,
+    };
+  } catch (error) {
+    console.error('❌ Cardano balance fetch failed:', error instanceof Error ? error.message : 'Unknown error');
+    return {
+      balance: '0',
+      usdValue: 0,
+    };
+  }
+}
+
+/**
+ * Fetch balance for NEAR testnet
+ */
+export async function fetchNearBalance(address: string): Promise<{ balance: string; usdValue: number }> {
+  // Skip if address is invalid
+  if (!address || address === 'Invalid public key' || !address.endsWith('.near')) {
+    console.log(`⏭️ Skipping NEAR balance fetch for invalid address: ${address}`);
+    return {
+      balance: '0',
+      usdValue: 0,
+    };
+  }
+
+  try {
+    // Add timeout to fetch request
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+    const response = await fetch(NEAR_TESTNET.rpcUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'query',
+        params: {
+          request_type: 'view_account',
+          finality: 'final',
+          account_id: address,
+        },
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      throw new Error(`NEAR RPC returned ${response.status}`);
+    }
+
+    const data = await response.json();
+
+    if (data.error) {
+      throw new Error(`NEAR RPC error: ${data.error.message}`);
+    }
+
+    const yoctoNear = data.result?.amount || '0';
+    const balance = (BigInt(yoctoNear) / BigInt(1e24)).toString() + '.' +
+                    (BigInt(yoctoNear) % BigInt(1e24)).toString().padStart(24, '0').substring(0, 6);
+
+    console.log(`✅ NEAR balance: ${balance} NEAR`);
+
+    return {
+      balance,
+      usdValue: 0,
+    };
+  } catch (error) {
+    console.error('❌ NEAR balance fetch failed:', error instanceof Error ? error.message : 'Unknown error');
+    return {
+      balance: '0',
+      usdValue: 0,
+    };
+  }
+}
+
+/**
  * Fetch balances for all compatible chains
  */
 export async function fetchAllBalances(
@@ -238,11 +392,16 @@ export async function fetchAllBalances(
           balances[chain] = await fetchEVMBalance(chain, address);
         }
       } else {
-        // ED25519 - Solana and others
+        // ED25519 - Solana, Polkadot, Cardano, NEAR
         if (chain === 'Solana') {
           balances[chain] = await fetchSolanaBalance(address);
+        } else if (chain === 'Polkadot') {
+          balances[chain] = await fetchPolkadotBalance(address);
+        } else if (chain === 'Cardano') {
+          balances[chain] = await fetchCardanoBalance(address);
+        } else if (chain === 'NEAR') {
+          balances[chain] = await fetchNearBalance(address);
         } else {
-          // For Polkadot, Cardano, NEAR - return 0 for now
           balances[chain] = { balance: '0', usdValue: 0 };
         }
       }

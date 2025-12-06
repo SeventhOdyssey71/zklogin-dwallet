@@ -104,12 +104,16 @@ export async function getDWalletById(dWalletId: string) {
       if (pubOutputBytes && Array.isArray(pubOutputBytes)) {
         // Use official Ika SDK method to extract actual public key
         const curve = dWallet.curve === 0 ? Curve.SECP256K1 : Curve.ED25519;
+        console.log('🔬 public_output bytes length:', pubOutputBytes.length);
+
         const actualPublicKey = await publicKeyFromDWalletOutput(
           curve,
           Uint8Array.from(pubOutputBytes)
         );
         publicKey = '0x' + Buffer.from(actualPublicKey).toString('hex');
         console.log('✅ Extracted public key using Ika SDK');
+        console.log('🔑 Public key:', publicKey);
+        console.log('🔑 Public key length:', publicKey.length, 'bytes:', actualPublicKey.length);
       }
     } else if (dWallet.state.$kind === 'Active') {
       const stateData = dWallet.state as any;
@@ -118,16 +122,18 @@ export async function getDWalletById(dWalletId: string) {
       if (pubOutputBytes && Array.isArray(pubOutputBytes)) {
         // Use official Ika SDK method to extract actual public key
         const curve = dWallet.curve === 0 ? Curve.SECP256K1 : Curve.ED25519;
+        console.log('🔬 public_output bytes length:', pubOutputBytes.length);
+
         const actualPublicKey = await publicKeyFromDWalletOutput(
           curve,
           Uint8Array.from(pubOutputBytes)
         );
         publicKey = '0x' + Buffer.from(actualPublicKey).toString('hex');
         console.log('✅ Extracted public key using Ika SDK');
+        console.log('🔑 Public key:', publicKey);
+        console.log('🔑 Public key length:', publicKey.length, 'bytes:', actualPublicKey.length);
       }
     }
-
-    console.log('🔑 Public key length:', publicKey?.length);
 
     return {
       id: dWalletId,

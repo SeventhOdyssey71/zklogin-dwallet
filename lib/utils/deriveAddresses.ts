@@ -89,10 +89,54 @@ export function deriveSolanaAddress(publicKey: string): string {
     const hex = publicKey.startsWith('0x') ? publicKey.slice(2) : publicKey;
     const bytes = Buffer.from(hex, 'hex');
 
+    console.log('🔍 Deriving Solana address from public key:');
+    console.log('   Public key hex:', hex);
+    console.log('   Public key bytes length:', bytes.length);
+
     // Solana address is just the base58-encoded public key (32 bytes for ED25519)
-    return bs58.encode(bytes);
+    const address = bs58.encode(bytes);
+    console.log('   ✅ Solana address:', address);
+    return address;
   } catch (error) {
     console.error('Error deriving Solana address:', error);
+    return 'Invalid public key';
+  }
+}
+
+/**
+ * Derive Polkadot address from ED25519 public key
+ * Polkadot uses SS58 encoding with network prefix
+ */
+export function derivePolkadotAddress(publicKey: string): string {
+  try {
+    // For now, use a simplified version - proper SS58 encoding requires @polkadot/util-crypto
+    // This creates a valid-looking address but may not match actual Polkadot derivation
+    const bs58 = require('bs58');
+    const hex = publicKey.startsWith('0x') ? publicKey.slice(2) : publicKey;
+    const bytes = Buffer.from(hex, 'hex');
+
+    // Add Polkadot network prefix (0x00 for generic substrate)
+    const prefixedBytes = Buffer.concat([Buffer.from([0x00]), bytes]);
+    return bs58.encode(prefixedBytes);
+  } catch (error) {
+    console.error('Error deriving Polkadot address:', error);
+    return 'Invalid public key';
+  }
+}
+
+/**
+ * Derive Cardano address from ED25519 public key
+ * Cardano uses Bech32 encoding
+ */
+export function deriveCardanoAddress(publicKey: string): string {
+  try {
+    // For now, create a placeholder since proper Cardano address derivation
+    // requires the cardano-serialization-lib
+    // Real Cardano addresses need both payment and stake keys
+    const hex = publicKey.startsWith('0x') ? publicKey.slice(2) : publicKey;
+    return `addr_test1${hex.substring(0, 54)}`;
+  } catch (error) {
+    console.error('Error deriving Cardano address:', error);
     return 'Invalid public key';
   }
 }
@@ -120,6 +164,10 @@ export function deriveNearAddress(publicKey: string): string {
  * @param curve - The curve type (0 = SECP256K1, 1 = ED25519)
  */
 export function deriveChainAddresses(publicKey: string, curve: number): { [chain: string]: string } {
+  console.log('🎯 deriveChainAddresses called:');
+  console.log('   Public key:', publicKey.substring(0, 20) + '...');
+  console.log('   Curve:', curve === 0 ? 'SECP256K1' : 'ED25519');
+
   if (curve === 0) {
     // SECP256K1 - Bitcoin, Ethereum, Polygon, Avalanche, BSC
     const ethAddress = deriveEthereumAddress(publicKey);
@@ -135,12 +183,14 @@ export function deriveChainAddresses(publicKey: string, curve: number): { [chain
   } else {
     // ED25519 - Solana, Polkadot, Cardano, NEAR
     const solanaAddress = deriveSolanaAddress(publicKey);
+    const polkadotAddress = derivePolkadotAddress(publicKey);
+    const cardanoAddress = deriveCardanoAddress(publicKey);
     const nearAddress = deriveNearAddress(publicKey);
 
     return {
       'Solana': solanaAddress,
-      'Polkadot': solanaAddress, // Polkadot also uses base58, similar format to Solana
-      'Cardano': solanaAddress, // Cardano uses bech32 but for now show as base58
+      'Polkadot': polkadotAddress,
+      'Cardano': cardanoAddress,
       'NEAR': nearAddress,
     };
   }

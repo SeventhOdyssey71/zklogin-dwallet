@@ -78,6 +78,18 @@ export const SOLANA_TESTNET = {
   blockExplorer: 'https://explorer.solana.com/?cluster=devnet',
 };
 
+export const POLKADOT_TESTNET = {
+  name: 'Polkadot Westend',
+  rpcUrl: 'https://westend-rpc.polkadot.io',
+  blockExplorer: 'https://westend.subscan.io',
+};
+
+export const CARDANO_TESTNET = {
+  name: 'Cardano Preview',
+  rpcUrl: 'https://cardano-preview.blockfrost.io/api/v0',
+  blockExplorer: 'https://preview.cardanoscan.io',
+};
+
 export const NEAR_TESTNET = {
   name: 'NEAR Testnet',
   rpcUrl: 'https://rpc.testnet.near.org',
