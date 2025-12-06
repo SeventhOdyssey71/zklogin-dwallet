@@ -1,24 +1,11 @@
 /**
- * Utility functions to derive chain-specific addresses from dWallet public output
+ * Utility functions to derive chain-specific addresses from dWallet public key
+ *
+ * NOTE: The public key should already be extracted from public_output using
+ * the official Ika SDK method: publicKeyFromDWalletOutput()
  */
 
 import { computeAddress } from 'ethers';
-
-/**
- * Parse the public_output from dWallet to extract the actual public key
- * Structure: [format_byte] [length] [public_key_bytes] [...]
- */
-export function extractPublicKeyFromOutput(publicOutput: string): string {
-  // Remove 0x prefix if present
-  const hex = publicOutput.startsWith('0x') ? publicOutput.slice(2) : publicOutput;
-  const bytes = Buffer.from(hex, 'hex');
-
-  // Extract: byte 0 is format, byte 1 is length, remaining is the key
-  const keyLength = bytes[1];
-  const publicKey = bytes.slice(2, 2 + keyLength);
-
-  return '0x' + publicKey.toString('hex');
-}
 
 /**
  * Derive Ethereum-compatible address from SECP256K1 public key
@@ -35,13 +22,61 @@ export function deriveEthereumAddress(publicKey: string): string {
 }
 
 /**
- * Derive Bitcoin address from SECP256K1 public key
- * Returns P2PKH address (legacy format starting with 1)
+ * Derive Bitcoin testnet address from SECP256K1 public key
+ * Returns P2PKH testnet address (starting with m or n)
  */
 export function deriveBitcoinAddress(publicKey: string): string {
-  // For now, return placeholder - proper implementation needs bitcoin address libraries
-  // TODO: Implement proper Bitcoin address derivation
-  return 'Bitcoin address derivation not implemented';
+  try {
+    // Use Node.js crypto for hashing
+    const crypto = require('crypto');
+
+    const hex = publicKey.startsWith('0x') ? publicKey.slice(2) : publicKey;
+    const pubKeyBuffer = Buffer.from(hex, 'hex');
+
+    // Bitcoin testnet P2PKH: version byte 0x6f
+    const sha256Hash = crypto.createHash('sha256').update(pubKeyBuffer).digest();
+    const ripemd160Hash = crypto.createHash('ripemd160').update(sha256Hash).digest();
+
+    // Add testnet version byte (0x6f for P2PKH testnet)
+    const versionedHash = Buffer.concat([Buffer.from([0x6f]), ripemd160Hash]);
+
+    // Double SHA256 for checksum
+    const checksum = crypto.createHash('sha256')
+      .update(crypto.createHash('sha256').update(versionedHash).digest())
+      .digest()
+      .slice(0, 4);
+
+    // Combine and encode to base58
+    const addressBytes = Buffer.concat([versionedHash, checksum]);
+    return base58Encode(addressBytes);
+  } catch (error) {
+    console.error('Error deriving Bitcoin address:', error);
+    return 'Invalid public key';
+  }
+}
+
+/**
+ * Base58 encoding for Bitcoin addresses
+ */
+function base58Encode(buffer: Buffer): string {
+  const ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+  const base = BigInt(58);
+
+  let num = BigInt('0x' + buffer.toString('hex'));
+  let encoded = '';
+
+  while (num > 0) {
+    const remainder = Number(num % base);
+    num = num / base;
+    encoded = ALPHABET[remainder] + encoded;
+  }
+
+  // Add leading '1's for leading zero bytes
+  for (let i = 0; i < buffer.length && buffer[i] === 0; i++) {
+    encoded = '1' + encoded;
+  }
+
+  return encoded;
 }
 
 /**
@@ -80,10 +115,11 @@ export function deriveNearAddress(publicKey: string): string {
 
 /**
  * Derive addresses for all compatible chains based on curve type
+ *
+ * @param publicKey - The public key already extracted using publicKeyFromDWalletOutput()
+ * @param curve - The curve type (0 = SECP256K1, 1 = ED25519)
  */
-export function deriveChainAddresses(publicOutput: string, curve: number): { [chain: string]: string } {
-  const publicKey = extractPublicKeyFromOutput(publicOutput);
-
+export function deriveChainAddresses(publicKey: string, curve: number): { [chain: string]: string } {
   if (curve === 0) {
     // SECP256K1 - Bitcoin, Ethereum, Polygon, Avalanche, BSC
     const ethAddress = deriveEthereumAddress(publicKey);
