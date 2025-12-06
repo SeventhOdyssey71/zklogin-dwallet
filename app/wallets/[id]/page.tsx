@@ -27,6 +27,7 @@ import { dwalletAPI } from '@/lib/api/dwallet';
 import { getDWalletById } from '@/lib/api/blockchainDwallet';
 import { DWallet } from '@/lib/types/dwallet';
 import { BentoCard } from '@/components/ui/BentoCard';
+import { deriveChainAddresses } from '@/lib/utils/deriveAddresses';
 
 export default function WalletDetailPage() {
   const params = useParams();
@@ -75,17 +76,54 @@ export default function WalletDetailPage() {
       const savedName = localStorage.getItem(`dwallet_name_${walletId}`);
       const walletName = savedName || `dWallet ${walletId.substring(0, 8)}...`;
 
+      const compatibleChains = blockchainData.curve === 0
+        ? ['Bitcoin', 'Ethereum', 'Polygon', 'Avalanche', 'BSC']
+        : ['Solana', 'Polkadot', 'Cardano', 'NEAR'];
+
+      // Generate balances for all compatible chains with wallet addresses
+      const publicKey = blockchainData.publicKey || 'pending';
+      console.log('🔑 Public key from blockchain:', publicKey);
+
+      // Derive chain-specific addresses from public key
+      let chainAddresses: { [chain: string]: string } = {};
+      if (publicKey !== 'pending') {
+        chainAddresses = deriveChainAddresses(publicKey, blockchainData.curve);
+        console.log('📍 Derived addresses:', chainAddresses);
+      }
+
+      const balances = compatibleChains.map(chain => {
+        const symbols: { [key: string]: string } = {
+          'Bitcoin': 'BTC',
+          'Ethereum': 'ETH',
+          'Polygon': 'MATIC',
+          'Avalanche': 'AVAX',
+          'BSC': 'BNB',
+          'Solana': 'SOL',
+          'Polkadot': 'DOT',
+          'Cardano': 'ADA',
+          'NEAR': 'NEAR'
+        };
+
+        const address = chainAddresses[chain] || 'Activate wallet to view address';
+
+        return {
+          chain,
+          symbol: symbols[chain] || chain,
+          balance: '0',
+          usdValue: 0,
+          address
+        };
+      });
+
       const walletData: DWallet = {
         id: walletId,
         name: walletName,
         type: blockchainData.curve === 0 ? 'ECDSA' : 'EdDSA',
         curve: blockchainData.curve === 0 ? 'SECP256K1' : 'ED25519',
-        publicKey: blockchainData.publicKey || 'pending',
+        publicKey: publicKey,
         status,
-        compatibleChains: blockchainData.curve === 0
-          ? ['Bitcoin', 'Ethereum', 'Polygon', 'Avalanche', 'BSC']
-          : ['Solana', 'Polkadot', 'Cardano', 'NEAR'],
-        balances: [], // TODO: Fetch real balances
+        compatibleChains,
+        balances,
         createdAt: blockchainData.createdAt || new Date().toISOString(),
       };
 
@@ -101,10 +139,12 @@ export default function WalletDetailPage() {
       // Fallback to API
       try {
         const data = await dwalletAPI.getDWallet(walletId);
-        setWallet(data);
-        setEditedName(data.name);
-        if (data?.balances.length) {
-          setSelectedChain(data.balances[0].chain);
+        if (data) {
+          setWallet(data);
+          setEditedName(data.name);
+          if (data?.balances.length) {
+            setSelectedChain(data.balances[0].chain);
+          }
         }
       } catch (apiError) {
         console.error('Fallback API also failed:', apiError);
@@ -751,22 +791,6 @@ export default function WalletDetailPage() {
           {/* Sidebar */}
           <div className="space-y-6">
             <h2 className="text-3xl font-bold">Details</h2>
-
-            {/* Public Key */}
-            <BentoCard>
-              <h3 className="font-bold mb-2">Public Key</h3>
-              <div className="flex items-center gap-2">
-                <code className="text-sm font-mono break-all text-zinc-600 dark:text-zinc-400">
-                  {wallet.publicKey.slice(0, 20)}...
-                </code>
-                <button
-                  onClick={() => copyToClipboard(wallet.publicKey)}
-                  className="p-1 hover:bg-zinc-200 dark:hover:bg-zinc-800 rounded transition-colors"
-                >
-                  <Copy className="w-3 h-3" />
-                </button>
-              </div>
-            </BentoCard>
 
             {/* Compatible Chains */}
             <BentoCard>
