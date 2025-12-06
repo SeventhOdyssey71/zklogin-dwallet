@@ -28,6 +28,7 @@ import { getDWalletById } from '@/lib/api/blockchainDwallet';
 import { DWallet } from '@/lib/types/dwallet';
 import { BentoCard } from '@/components/ui/BentoCard';
 import { deriveChainAddresses } from '@/lib/utils/deriveAddresses';
+import { fetchAllBalances } from '@/lib/utils/fetchBalances';
 
 export default function WalletDetailPage() {
   const params = useParams();
@@ -91,6 +92,12 @@ export default function WalletDetailPage() {
         console.log('📍 Derived addresses:', chainAddresses);
       }
 
+      // Fetch real balances from testnets
+      console.log('💰 Fetching real balances from testnets...');
+      const realBalances = publicKey !== 'pending'
+        ? await fetchAllBalances(chainAddresses, blockchainData.curve)
+        : {};
+
       const balances = compatibleChains.map(chain => {
         const symbols: { [key: string]: string } = {
           'Bitcoin': 'BTC',
@@ -105,12 +112,13 @@ export default function WalletDetailPage() {
         };
 
         const address = chainAddresses[chain] || 'Activate wallet to view address';
+        const balanceData = realBalances[chain] || { balance: '0', usdValue: 0 };
 
         return {
           chain,
           symbol: symbols[chain] || chain,
-          balance: '0',
-          usdValue: 0,
+          balance: balanceData.balance,
+          usdValue: balanceData.usdValue,
           address
         };
       });
