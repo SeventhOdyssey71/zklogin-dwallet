@@ -21,21 +21,7 @@ export default function CreatePage() {
   // Sui Wallet Integration
   const account = useCurrentAccount();
   const suiClient = useSuiClient();
-  const { mutate: signAndExecuteTransaction } = useSignAndExecuteTransaction({
-    execute: async ({ bytes, signature }) => {
-      // Execute with full options to get objectChanges
-      const result = await suiClient.executeTransactionBlock({
-        transactionBlock: bytes,
-        signature,
-        options: {
-          showEffects: true,
-          showObjectChanges: true,
-          showEvents: true,
-        },
-      });
-      return result;
-    },
-  });
+  const { mutate: signAndExecuteTransaction } = useSignAndExecuteTransaction();
   const [mounted, setMounted] = useState(false);
 
   const [step, setStep] = useState<Step>(0);
@@ -79,6 +65,9 @@ export default function CreatePage() {
         config: networkConfig,
       });
 
+      // Initialize the client to ensure config is loaded
+      await ikaClient.initialize();
+
       console.log('✅ IkaClient initialized for testnet');
 
       // Step 2: Get IKA and SUI coins
@@ -103,13 +92,14 @@ export default function CreatePage() {
       console.log('📐 Using curve:', curve);
 
       // Step 4: Generate encryption keypair for user share
-      // In a real app, this should be derived from user's wallet or stored securely
-      // For now, we'll generate a random seed
-      const randomSeed = new Uint8Array(32);
-      crypto.getRandomValues(randomSeed);
+      // Use a deterministic seed based on user's address so we can recreate it during activation
+      // This allows us to regenerate the exact same encryption keys without storing them
+      const encryptionSeed = new TextEncoder().encode(`ika-dwallet-${account.address}`);
+
+      console.log('🔐 Using deterministic encryption seed for address:', account.address);
 
       const userShareEncryptionKeys = await UserShareEncryptionKeys.fromRootSeedKey(
-        randomSeed,
+        encryptionSeed,
         curve
       );
 
@@ -134,6 +124,7 @@ export default function CreatePage() {
       const sessionIdentifierBytes = createRandomSessionIdentifier();
       const sessionIdentifier = ikaTx.registerSessionIdentifier(sessionIdentifierBytes);
 
+      console.log('📝 Session identifier:', Array.from(sessionIdentifierBytes));
       console.log('📝 Session identifier registered');
       console.log('🔍 Transaction after session registration:', tx.getData().commands?.length, 'commands');
       console.log('🔍 Commands:', JSON.stringify(tx.getData().commands, null, 2));
@@ -175,8 +166,8 @@ export default function CreatePage() {
       const dkgDuration = ((Date.now() - dkgStartTime) / 1000).toFixed(2);
       console.log(`✅ DKG parameters prepared in ${dkgDuration}s`);
 
-      // Step 9: Request dWallet DKG
-      const dWalletCap = await ikaTx.requestDWalletDKG({
+      // Step 9: Request dWallet DKG (must use array destructuring!)
+      const [dWalletCap] = await ikaTx.requestDWalletDKG({
         dkgRequestInput,
         ikaCoin,
         suiCoin,
@@ -225,37 +216,95 @@ export default function CreatePage() {
           onSuccess: async (result) => {
             console.log('✅ Transaction executed successfully!');
             console.log('📦 Full Result:', result);
+            console.log('📜 Transaction digest:', result.digest);
 
-            // Check what happened to the coins
+            // Fetch full transaction details with retry (node needs time to index)
+            let txDetails;
+            let retries = 5;
+            while (retries > 0) {
+              try {
+                txDetails = await suiClient.getTransactionBlock({
+                  digest: result.digest,
+                  options: {
+                    showEffects: true,
+                    showObjectChanges: true,
+                    showEvents: true,
+                  },
+                });
+                break;
+              } catch (error: any) {
+                if (error.message?.includes('Could not find') && retries > 1) {
+                  console.log(`⏳ Transaction not indexed yet, retrying... (${retries} attempts left)`);
+                  await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds
+                  retries--;
+                } else {
+                  throw error;
+                }
+              }
+            }
+
+            if (!txDetails) {
+              throw new Error('Transaction succeeded but could not fetch details after multiple retries');
+            }
+
+            console.log('📦 Transaction details:', txDetails);
             console.log('\n💰 Analyzing Object Changes:');
-            console.log('All changes:', result.objectChanges);
+            console.log('All changes:', txDetails.objectChanges);
 
-            const ikaCoinChanges = result.objectChanges?.filter((change: any) =>
+            const ikaCoinChanges = txDetails.objectChanges?.filter((change: any) =>
               change.objectType?.includes('IKA')
             );
             console.log('\n🪙 IKA Coin Changes:', ikaCoinChanges);
 
-            const suiCoinChanges = result.objectChanges?.filter((change: any) =>
+            const suiCoinChanges = txDetails.objectChanges?.filter((change: any) =>
               change.objectType?.includes('0x2::coin::Coin<0x2::sui::SUI>')
             );
             console.log('💎 SUI Coin Changes:', suiCoinChanges);
 
             // Extract dWallet ID from object changes
             let dwalletId = null;
-            if (result.objectChanges) {
-              for (const change of result.objectChanges) {
+            let dwalletCapId = null;
+
+            if (txDetails.objectChanges) {
+              for (const change of txDetails.objectChanges) {
                 if (change.type === 'created' && change.objectType?.includes('DWalletCap')) {
-                  dwalletId = change.objectId;
+                  dwalletCapId = change.objectId;
                   break;
                 }
               }
             }
 
-            if (!dwalletId) {
-              throw new Error('Could not find created dWallet ID in transaction result');
+            if (!dwalletCapId) {
+              throw new Error('Could not find created DWalletCap in transaction result');
             }
 
-            console.log('\n🆔 New dWallet ID:', dwalletId);
+            // Fetch the DWalletCap object to get the actual dwallet_id field
+            const dwalletCapObject = await suiClient.getObject({
+              id: dwalletCapId,
+              options: { showContent: true },
+            });
+
+            const capContent = dwalletCapObject.data?.content as any;
+            if (capContent?.fields?.dwallet_id) {
+              dwalletId = capContent.fields.dwallet_id;
+            }
+
+            if (!dwalletId) {
+              throw new Error('Could not extract dWallet ID from DWalletCap');
+            }
+
+            console.log('\n🆔 DWalletCap ID:', dwalletCapId);
+            console.log('🆔 Actual dWallet ID:', dwalletId);
+
+            // Save session identifier and wallet name to localStorage for later activation and display
+            const sessionIdentifierKey = `dwallet_session_${dwalletId}`;
+            const sessionIdentifierArray = Array.from(sessionIdentifierBytes);
+            localStorage.setItem(sessionIdentifierKey, JSON.stringify(sessionIdentifierArray));
+
+            const walletNameKey = `dwallet_name_${dwalletId}`;
+            localStorage.setItem(walletNameKey, walletName);
+
+            console.log('💾 Saved session identifier and wallet name to localStorage');
 
             // Create wallet object for UI
             const newWallet = {
