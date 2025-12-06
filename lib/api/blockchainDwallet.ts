@@ -91,12 +91,38 @@ export async function getDWalletById(dWalletId: string) {
 
     const dWallet = await ikaClient.getDWallet(dWalletId);
 
+    console.log('🔍 dWallet state:', dWallet.state.$kind);
+
+    // Extract public key from state
+    let publicKey: string | undefined = undefined;
+
+    // Extract public key based on dWallet state
+    if (dWallet.state.$kind === 'AwaitingKeyHolderSignature') {
+      const stateData = dWallet.state as any;
+      const pubKeyBytes = stateData.AwaitingKeyHolderSignature?.public_output;
+      console.log('📋 Has public_output:', !!pubKeyBytes, 'Is array:', Array.isArray(pubKeyBytes));
+      if (pubKeyBytes && Array.isArray(pubKeyBytes)) {
+        publicKey = '0x' + Buffer.from(pubKeyBytes).toString('hex');
+        console.log('✅ Extracted public key length:', publicKey.length);
+      }
+    } else if (dWallet.state.$kind === 'Active') {
+      const stateData = dWallet.state as any;
+      const pubKeyBytes = stateData.Active?.public_output;
+      console.log('📋 Has public_output:', !!pubKeyBytes, 'Is array:', Array.isArray(pubKeyBytes));
+      if (pubKeyBytes && Array.isArray(pubKeyBytes)) {
+        publicKey = '0x' + Buffer.from(pubKeyBytes).toString('hex');
+        console.log('✅ Extracted public key length:', publicKey.length);
+      }
+    }
+
+    console.log('🔑 Final public key:', publicKey ? publicKey.substring(0, 50) + '...' : 'undefined');
+
     return {
       id: dWalletId,
       state: dWallet.state.$kind,
       curve: dWallet.curve,
-      publicKey: dWallet.publicKeyCommitment,
-      createdAt: dWallet.createdAt,
+      publicKey,
+      createdAt: (dWallet as any).created_at_epoch,
     };
   } catch (error) {
     console.error('Error fetching dWallet by ID:', error);
