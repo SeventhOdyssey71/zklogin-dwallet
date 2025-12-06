@@ -256,9 +256,73 @@ npm run dev
 
 ### Important Notes
 
-✅ **Browser-based dWallet creation is FULLY WORKING!**
+✅ **Browser-based dWallet creation implementation complete!**
 
 The Ika SDK (`@ika.xyz/sdk` v0.2.3) has full browser support via WebAssembly (`@ika.xyz/ika-wasm`).
+
+**Latest Fixes (2025-12-05):**
+
+1. **Transaction Structure Issues (FIXED - 2025-12-05 Evening)**
+   - **Problem:** Command count dropped from 6 to 4, "Internal error" from RPC
+   - **Root Cause:** Using `coordinatorTransactions.registerSessionIdentifier()` instead of `IkaTransaction.registerSessionIdentifier()`
+   - **Missing Step:** Not calling `tx.transferObjects([dWalletCap], account.address)` after DKG
+   - **Solution:**
+     - Create `IkaTransaction` wrapper FIRST
+     - Call `ikaTx.registerSessionIdentifier(sessionIdentifierBytes)` on the wrapper
+     - After `requestDWalletDKG` returns DWalletCap, transfer it to user with `tx.transferObjects()`
+   - **Pattern from SDK tests (line 220 in test/v2/helpers.ts):**
+     ```typescript
+     const [dWalletCap] = await ikaTransaction.requestDWalletDKG({...});
+     suiTransaction.transferObjects([dWalletCap], signerAddress);
+     ```
+   - Files updated: `app/create/page.tsx:115-182`
+
+2. **Empty Transaction Issue (FIXED)**
+   - Combined encryption key registration and dWallet creation in single transaction
+   - Previously attempted two-step flow (register key, then create dWallet separately)
+   - Now follows Ika SDK test pattern: both operations in one transaction
+   - When no encryption key exists, `registerEncryptionKey()` and `requestDWalletDKG()` are both called on same IkaTransaction instance
+   - User signs once for both operations
+
+3. **CORS Issue with Sui RPC (FIXED)**
+   - Official Mysten RPC (`https://fullnode.testnet.sui.io/`) blocks CORS from browsers
+   - Error: "No 'Access-Control-Allow-Origin' header is present"
+   - **Solution:** Reordered RPC endpoints to use CORS-friendly alternatives first:
+     - Primary: `https://sui-testnet.publicnode.com:443`
+     - Secondary: `https://sui-testnet-endpoint.blockvision.org`
+     - Fallback: AllThatNode and Mysten RPC
+   - Browser-based dApps require CORS-enabled RPC endpoints
+   - File updated: `lib/providers/SuiWalletProvider.tsx`
+
+4. **Token Handling Pattern (FIXED - Using Official SDK Pattern)**
+   - **Initial Concern:** Transaction was consuming ALL IKA and SUI tokens
+   - **Investigation:** Checked official Ika SDK test utilities in `/ika/sdk/typescript/test/helpers/test-utils.ts`
+   - **Official SDK Pattern (lines 290-311):**
+     ```typescript
+     // Create zero-value coins (no balance to consume)
+     const ikaCoin = tx.moveCall({
+       target: '0x2::coin::zero',
+       arguments: [],
+       typeArguments: [`${ikaPackage}::ika::IKA`],
+     });
+
+     // ... use in protocol functions ...
+
+     // Destroy zero coins after use
+     tx.moveCall({
+       target: '0x2::coin::destroy_zero',
+       arguments: [ikaCoin],
+       typeArguments: [`${ikaPackage}::ika::IKA`],
+     });
+     ```
+   - **How it Works:**
+     - Zero-value coins have 0 balance - nothing to consume!
+     - Protocol functions accept these coins (satisfies type requirements)
+     - No actual tokens taken from user's wallet
+     - Only real cost: gas fees
+   - File updated: `app/create/page.tsx:107-120, 187-198`
+   - **Pattern matches official Ika SDK test utilities exactly**
+   - This is the standard approach used throughout SDK tests
 
 **Implementation Complete:**
 - ✅ IkaClient initialization with testnet configuration
@@ -273,14 +337,16 @@ The Ika SDK (`@ika.xyz/sdk` v0.2.3) has full browser support via WebAssembly (`@
 
 **How It Works:**
 
-1. **First Time (per curve):**
+1. **First Time (per curve - no encryption key registered):**
    - Click "Create dWallet"
    - System detects no encryption key
-   - Registers encryption key on-chain
-   - User signs encryption key registration transaction
-   - Click "Create dWallet" again
+   - Adds encryption key registration to transaction
+   - Generates DKG parameters in browser using WASM
+   - Adds dWallet creation to same transaction
+   - User signs ONE transaction that does both operations
+   - DWallet created!
 
-2. **Subsequent Times:**
+2. **Subsequent Times (encryption key already registered):**
    - Click "Create dWallet"
    - System finds existing encryption key
    - Generates DKG parameters in browser using WASM
@@ -297,7 +363,18 @@ The Ika SDK (`@ika.xyz/sdk` v0.2.3) has full browser support via WebAssembly (`@
 
 ### Next Phase
 
-1. Wait for Sui testnet RPC to be stable (current 504 errors are infrastructure issues)
-2. Test complete flow with stable network
-3. Implement signing operations (send, swap, etc.) using the same pattern
-4. Add encryption key persistence (localStorage or derive from wallet)
+1. **Test the complete dWallet creation flow**
+   - User needs to verify with actual wallet and tokens
+   - Check console logs for transaction command count
+   - Verify both encryption key registration and dWallet creation succeed
+
+2. **Implement signing operations** (send, swap, etc.) using the same pattern:
+   - Request presign
+   - Approve message
+   - Sign with dWallet
+   - All in browser using Ika SDK
+
+3. **Optional optimizations:**
+   - Add encryption key persistence (localStorage or derive from wallet)
+   - Improve error messages and user feedback
+   - Add loading states during DKG computation
