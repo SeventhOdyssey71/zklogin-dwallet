@@ -92,11 +92,14 @@ export default function CreatePage() {
       console.log('📐 Using curve:', curve);
 
       // Step 4: Generate encryption keypair for user share
-      // Use a deterministic seed based on user's address so we can recreate it during activation
-      // This allows us to regenerate the exact same encryption keys without storing them
-      const encryptionSeed = new TextEncoder().encode(`ika-dwallet-${account.address}`);
+      // IMPORTANT: Use a UNIQUE seed for each dWallet to avoid encryption key registration conflicts
+      // We generate a random seed and combine it with the session identifier for uniqueness
+      // The encryption key address will be stored in localStorage for later activation
+      const sessionIdentifierBytes = createRandomSessionIdentifier();
+      const encryptionSeed = new Uint8Array([...sessionIdentifierBytes, ...new TextEncoder().encode(`ika-dwallet-${account.address}`)]);
 
-      console.log('🔐 Using deterministic encryption seed for address:', account.address);
+      console.log('🔐 Generating unique encryption keys for this dWallet');
+      console.log('🔐 Seed includes session identifier for uniqueness');
 
       const userShareEncryptionKeys = await UserShareEncryptionKeys.fromRootSeedKey(
         encryptionSeed,
@@ -120,8 +123,7 @@ export default function CreatePage() {
       const ikaCoin = tx.object(largestIkaCoin.coinObjectId);
       const suiCoin = tx.gas; // Use tx.gas directly, don't split
 
-      // Use SDK's random session identifier (not timestamp-based)
-      const sessionIdentifierBytes = createRandomSessionIdentifier();
+      // Register the session identifier (already created above)
       const sessionIdentifier = ikaTx.registerSessionIdentifier(sessionIdentifierBytes);
 
       console.log('📝 Session identifier:', Array.from(sessionIdentifierBytes));
@@ -129,26 +131,19 @@ export default function CreatePage() {
       console.log('🔍 Transaction after session registration:', tx.getData().commands?.length, 'commands');
       console.log('🔍 Commands:', JSON.stringify(tx.getData().commands, null, 2));
 
-      // Step 7: Check if user has encryption key registered, if not register it in this tx
-      console.log('🔍 Checking for existing encryption key...');
-      let activeEncryptionKeyId: string;
-      try {
-        const encryptionKeyObj = await ikaClient.getActiveEncryptionKey(account.address);
-        // Extract the ID from the EncryptionKey object structure
-        activeEncryptionKeyId = encryptionKeyObj.id.id;
-        console.log('✅ Found existing encryption key:', activeEncryptionKeyId);
-      } catch (error) {
-        console.log('📝 No encryption key found, will register in this transaction...');
-        await ikaTx.registerEncryptionKey({ curve });
-        console.log('✅ Encryption key registration added to transaction');
-        console.log('🔍 Transaction after encryption key registration:', tx.getData().commands?.length, 'commands');
-        console.log('🔍 Commands:', JSON.stringify(tx.getData().commands, null, 2));
+      // Step 7: Register encryption key for this dWallet
+      // Since we use unique encryption keys for each dWallet (based on session identifier),
+      // we always register a new encryption key
+      console.log('📝 Registering unique encryption key for this dWallet...');
+      await ikaTx.registerEncryptionKey({ curve });
+      console.log('✅ Encryption key registration added to transaction');
+      console.log('🔍 Transaction after encryption key registration:', tx.getData().commands?.length, 'commands');
+      console.log('🔍 Commands:', JSON.stringify(tx.getData().commands, null, 2));
 
-        // Get the latest network encryption key since we just added registration
-        const latestNetworkKey = await ikaClient.getLatestNetworkEncryptionKey();
-        activeEncryptionKeyId = latestNetworkKey.id;
-        console.log('📝 Will use latest network encryption key:', activeEncryptionKeyId);
-      }
+      // Get the latest network encryption key since we just added registration
+      const latestNetworkKey = await ikaClient.getLatestNetworkEncryptionKey();
+      const activeEncryptionKeyId = latestNetworkKey.id;
+      console.log('📝 Will use latest network encryption key:', activeEncryptionKeyId);
 
       // Step 8: Prepare DKG (Distributed Key Generation) parameters
       console.log('🔢 Preparing DKG cryptographic parameters...');
@@ -296,15 +291,19 @@ export default function CreatePage() {
             console.log('\n🆔 DWalletCap ID:', dwalletCapId);
             console.log('🆔 Actual dWallet ID:', dwalletId);
 
-            // Save session identifier and wallet name to localStorage for later activation and display
+            // Save session identifier, encryption seed, and wallet name to localStorage for later activation
             const sessionIdentifierKey = `dwallet_session_${dwalletId}`;
             const sessionIdentifierArray = Array.from(sessionIdentifierBytes);
             localStorage.setItem(sessionIdentifierKey, JSON.stringify(sessionIdentifierArray));
 
+            const encryptionSeedKey = `dwallet_encryption_seed_${dwalletId}`;
+            const encryptionSeedArray = Array.from(encryptionSeed);
+            localStorage.setItem(encryptionSeedKey, JSON.stringify(encryptionSeedArray));
+
             const walletNameKey = `dwallet_name_${dwalletId}`;
             localStorage.setItem(walletNameKey, walletName);
 
-            console.log('💾 Saved session identifier and wallet name to localStorage');
+            console.log('💾 Saved session identifier, encryption seed, and wallet name to localStorage');
 
             // Create wallet object for UI
             const newWallet = {

@@ -125,18 +125,37 @@ export default function WalletDetailPage() {
       });
       await ikaClient.initialize();
 
-      // Get full dWallet details from blockchain
-      const dWallet = await ikaClient.getDWallet(walletId);
-      console.log('📦 dWallet state:', dWallet.state.$kind);
+      // Get full dWallet details from blockchain and wait for correct state
+      let dWallet = await ikaClient.getDWallet(walletId);
+      console.log('📦 Initial dWallet state:', dWallet.state.$kind);
 
-      // Check if dWallet is in a state that requires acceptEncryptedUserShare activation
+      // If wallet is still in AwaitingNetworkDKGVerification, poll until it reaches AwaitingKeyHolderSignature
+      if (dWallet.state.$kind === 'AwaitingNetworkDKGVerification') {
+        console.log('⏳ dWallet is still being processed by the network, polling for completion...');
+        let attempts = 0;
+        const maxAttempts = 30; // 30 attempts * 2 seconds = 1 minute max wait
+
+        while (dWallet.state.$kind === 'AwaitingNetworkDKGVerification' && attempts < maxAttempts) {
+          await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds
+          dWallet = await ikaClient.getDWallet(walletId);
+          attempts++;
+          console.log(`⏳ Attempt ${attempts}/${maxAttempts}: State is ${dWallet.state.$kind}`);
+        }
+
+        if (dWallet.state.$kind === 'AwaitingNetworkDKGVerification') {
+          throw new Error('Network DKG verification is taking longer than expected. Please try activating again in a few moments.');
+        }
+
+        console.log('✅ Network DKG verification complete!');
+      }
+
+      // Check if dWallet is in the correct state for activation
       const stateKind = dWallet.state.$kind;
+      console.log('📋 Final dWallet state:', stateKind);
       console.log('📋 Full dWallet state:', JSON.stringify(dWallet.state, null, 2));
-      console.log('📋 Full dWallet object:', JSON.stringify(dWallet, null, 2));
 
-      // Both AwaitingNetworkDKGVerification and AwaitingKeyHolderSignature need activation
-      if (stateKind !== 'AwaitingNetworkDKGVerification' && stateKind !== 'AwaitingKeyHolderSignature') {
-        throw new Error(`This dWallet is in "${stateKind}" state. Activation is only for wallets in "AwaitingNetworkDKGVerification" or "AwaitingKeyHolderSignature" state.`);
+      if (stateKind !== 'AwaitingKeyHolderSignature') {
+        throw new Error(`This dWallet is in "${stateKind}" state. Activation is only for wallets in "AwaitingKeyHolderSignature" state.`);
       }
 
       // Get encrypted user secret key share ID from the dWallet's encrypted_user_secret_key_shares table
@@ -213,11 +232,20 @@ export default function WalletDetailPage() {
       const sessionIdentifierBytes = new Uint8Array(sessionIdentifierArray);
       console.log('📝 Retrieved session identifier from localStorage');
 
-      // Recreate UserShareEncryptionKeys using the SAME deterministic seed as during creation
+      // Recreate UserShareEncryptionKeys using the saved encryption seed from creation
       const curve = dWallet.curve === 0 ? Curve.SECP256K1 : Curve.ED25519;
-      const encryptionSeed = new TextEncoder().encode(`ika-dwallet-${account.address}`);
 
-      console.log('🔐 Recreating encryption keys with deterministic seed for address:', account.address);
+      // Retrieve encryption seed from localStorage
+      const encryptionSeedKey = `dwallet_encryption_seed_${walletId}`;
+      const encryptionSeedJSON = localStorage.getItem(encryptionSeedKey);
+
+      if (!encryptionSeedJSON) {
+        throw new Error('Encryption seed not found. This dWallet was created in a different browser session. Activation must be done immediately after creation.');
+      }
+
+      const encryptionSeedArray = JSON.parse(encryptionSeedJSON);
+      const encryptionSeed = new Uint8Array(encryptionSeedArray);
+      console.log('🔐 Recreating encryption keys from saved seed');
 
       const userShareEncryptionKeys = await UserShareEncryptionKeys.fromRootSeedKey(encryptionSeed, curve);
 
