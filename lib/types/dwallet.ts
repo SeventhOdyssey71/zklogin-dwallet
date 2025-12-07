@@ -22,6 +22,8 @@ export interface DWallet {
   status: DWalletStatus;
   compatibleChains: string[];
   balances: DWalletBalance[];
+  dwalletCapId?: string;
+  encryptedShareId?: string;
 }
 
 export interface CreateDWalletRequest {

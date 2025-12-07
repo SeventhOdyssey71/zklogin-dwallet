@@ -92,6 +92,7 @@ export async function getDWalletById(dWalletId: string) {
     const dWallet = await ikaClient.getDWallet(dWalletId);
 
     console.log('🔍 dWallet state:', dWallet.state.$kind);
+    console.log('🔍 Full dWallet object:', JSON.stringify(dWallet, null, 2));
 
     // Extract public key using official Ika SDK method
     let publicKey: string | undefined = undefined;
@@ -135,12 +136,74 @@ export async function getDWalletById(dWalletId: string) {
       }
     }
 
+    // For zero-trust dWallets, we need to find the encrypted share
+    // The encrypted share is typically created as a separate object during DKG
+    let encryptedShareId: string | undefined = undefined;
+
+    // First, try to get it from the dWallet object itself
+    const dWalletObj = await suiClient.getObject({
+      id: dWalletId,
+      options: { showContent: true, showType: true },
+    });
+
+    console.log('🔍 dWallet object type:', dWalletObj.data?.type);
+    console.log('🔍 dWallet object content:', JSON.stringify((dWalletObj.data?.content as any)?.fields, null, 2));
+
+    // Try multiple strategies to find the encrypted share
+    const content = (dWalletObj.data?.content as any)?.fields;
+
+    // Strategy 1: Check if it's in encrypted_user_secret_key_shares field
+    if (content?.encrypted_user_secret_key_shares) {
+      const shares = content.encrypted_user_secret_key_shares;
+      console.log('📦 Found encrypted_user_secret_key_shares:', shares);
+
+      // Check if it's a Table with an id field
+      if (shares.type?.includes('Table') && shares.fields?.id?.id) {
+        const tableId = shares.fields.id.id;
+        console.log('📋 Table ID:', tableId);
+
+        // Query dynamic fields of the table
+        try {
+          const dynamicFields = await suiClient.getDynamicFields({
+            parentId: tableId,
+          });
+
+          console.log('🔍 Dynamic fields:', dynamicFields);
+
+          if (dynamicFields.data.length > 0) {
+            // Get the first dynamic field value
+            const firstField = dynamicFields.data[0];
+            const fieldObject = await suiClient.getDynamicFieldObject({
+              parentId: tableId,
+              name: firstField.name,
+            });
+
+            console.log('📄 Field object:', fieldObject);
+
+            // Extract the encrypted share ID from the field value
+            const fieldContent = (fieldObject.data?.content as any)?.fields?.value;
+            if (fieldContent?.fields?.id?.id) {
+              encryptedShareId = fieldContent.fields.id.id;
+            } else if (typeof fieldContent === 'string') {
+              encryptedShareId = fieldContent;
+            }
+          }
+        } catch (err) {
+          console.warn('Could not query table dynamic fields:', err);
+        }
+      }
+    }
+
+    console.log('📝 Final encrypted share ID:', encryptedShareId);
+
     return {
       id: dWalletId,
       state: dWallet.state.$kind,
       curve: dWallet.curve,
       publicKey,
       createdAt: (dWallet as any).created_at_epoch,
+      dwalletCapId: dWallet.dwallet_cap_id,
+      encryptedShareId,
     };
   } catch (error) {
     console.error('Error fetching dWallet by ID:', error);

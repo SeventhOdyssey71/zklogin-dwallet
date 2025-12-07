@@ -1,6 +1,6 @@
 'use client';
 
-import { useCurrentAccount, useDisconnectWallet, useWallets, useConnectWallet } from '@mysten/dapp-kit';
+import { useCurrentAccount, useDisconnectWallet, useWallets, useConnectWallet, ConnectButton } from '@mysten/dapp-kit';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Wallet, LogOut, Copy, Check, X } from 'lucide-react';
 import { useState, useEffect } from 'react';
