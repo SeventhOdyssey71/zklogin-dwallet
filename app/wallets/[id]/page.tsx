@@ -29,6 +29,7 @@ import { DWallet } from '@/lib/types/dwallet';
 import { BentoCard } from '@/components/ui/BentoCard';
 import { deriveChainAddresses } from '@/lib/utils/deriveAddresses';
 import { fetchAllBalances } from '@/lib/utils/fetchBalances';
+import { SendTransaction } from '@/components/SendTransaction';
 
 export default function WalletDetailPage() {
   const params = useParams();
@@ -46,6 +47,13 @@ export default function WalletDetailPage() {
   const [selectedChain, setSelectedChain] = useState<string | null>(null);
   const [isEditingName, setIsEditingName] = useState(false);
   const [editedName, setEditedName] = useState('');
+  const [isSendDialogOpen, setIsSendDialogOpen] = useState(false);
+  const [sendChainData, setSendChainData] = useState<{
+    chain: string;
+    symbol: string;
+    address: string;
+    balance: string;
+  } | null>(null);
 
   useEffect(() => {
     loadWallet();
@@ -133,6 +141,8 @@ export default function WalletDetailPage() {
         compatibleChains,
         balances,
         createdAt: blockchainData.createdAt || new Date().toISOString(),
+        dwalletCapId: blockchainData.dwalletCapId,
+        encryptedShareId: blockchainData.encryptedShareId,
       };
 
       setWallet(walletData);
@@ -774,7 +784,17 @@ export default function WalletDetailPage() {
                           <motion.button
                             whileHover={{ scale: 1.05 }}
                             whileTap={{ scale: 0.95 }}
-                            className="px-4 py-2 rounded-full bg-gradient-to-r from-purple-600 to-pink-600 text-white font-medium cursor-hover flex items-center gap-2"
+                            onClick={() => {
+                              setSendChainData({
+                                chain: balance.chain,
+                                symbol: balance.symbol,
+                                address: balance.address,
+                                balance: balance.balance,
+                              });
+                              setIsSendDialogOpen(true);
+                            }}
+                            disabled={balance.address === 'Activate wallet to view address'}
+                            className="px-4 py-2 rounded-full bg-gradient-to-r from-purple-600 to-pink-600 text-white font-medium cursor-hover flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                           >
                             <Send className="w-4 h-4" />
                             Send
@@ -839,6 +859,44 @@ export default function WalletDetailPage() {
             </BentoCard>
           </div>
         </div>
+
+        {/* Send Transaction Dialog */}
+        {isSendDialogOpen && sendChainData && (
+          <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white dark:bg-zinc-900 rounded-2xl max-w-md w-full max-h-[90vh] overflow-y-auto"
+            >
+              <div className="p-6">
+                <div className="flex items-center justify-between mb-6">
+                  <h2 className="text-2xl font-bold">Send {sendChainData.symbol}</h2>
+                  <button
+                    onClick={() => setIsSendDialogOpen(false)}
+                    className="p-2 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-full transition-colors"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                <SendTransaction
+                  chain={sendChainData.chain}
+                  symbol={sendChainData.symbol}
+                  address={sendChainData.address}
+                  balance={sendChainData.balance}
+                  dwalletId={walletId}
+                  dwalletCapId={wallet?.dwalletCapId || ''}
+                  encryptedShareId={wallet?.encryptedShareId || ''}
+                  onTransactionComplete={() => {
+                    setIsSendDialogOpen(false);
+                    // Don't refresh - let user manually refresh to see updated balance
+                  }}
+                />
+              </div>
+            </motion.div>
+          </div>
+        )}
       </div>
     </main>
   );
