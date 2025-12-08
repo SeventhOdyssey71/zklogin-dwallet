@@ -3,20 +3,75 @@
  *
  * NOTE: The public key should already be extracted from public_output using
  * the official Ika SDK method: publicKeyFromDWalletOutput()
+ *
+ * CRITICAL CONCEPT (from console3.md):
+ * ==================================
+ * Ethereum addresses are NOT stored on-chain - they're DERIVED from public keys!
+ *
+ * The process:
+ * 1. Decompress public key (if compressed) → 65 bytes with 0x04 prefix
+ * 2. Remove the 0x04 prefix → 64 bytes
+ * 3. KECCAK256 hash → 32 bytes
+ * 4. Take LAST 20 bytes → Ethereum address
+ *
+ * This is why transactions don't need a "from" field - the address is
+ * recovered from the signature using the same process!
  */
-
-import { computeAddress } from 'ethers';
 
 /**
  * Derive Ethereum-compatible address from SECP256K1 public key
  * Works for: Ethereum, Polygon, Avalanche C-Chain, BSC
+ *
+ * Process (from console3.md):
+ * 1. If compressed (33 bytes): decompress using ethers.SigningKey.computePublicKey(key, false)
+ * 2. Derive address using ethers.computeAddress(uncompressed)
+ *    - This does: KECCAK256(pubkey without 0x04 prefix).slice(-20)
+ *
+ * @param publicKey - Compressed (33 bytes) or uncompressed (64/65 bytes) SECP256K1 public key
+ * @returns Checksummed Ethereum address (EIP-55 format)
  */
 export function deriveEthereumAddress(publicKey: string): string {
   try {
-    // ethers.computeAddress handles the keccak256 hashing
-    return computeAddress(publicKey);
+    const ethers = require('ethers');
+    const hex = publicKey.startsWith('0x') ? publicKey.slice(2) : publicKey;
+    const keyBytes = Buffer.from(hex, 'hex');
+
+    let uncompressedPubKey: string;
+
+    // STEP 1: Handle different public key formats
+    if (keyBytes.length === 33) {
+      // Compressed public key (33 bytes): [0x02 or 0x03][32-byte x-coordinate]
+      // SECP256K1 point compression: 0x02 = even Y, 0x03 = odd Y
+      const compressedHex = '0x' + hex;
+      console.log('📝 Compressed SECP256K1 key (33 bytes):', compressedHex);
+
+      // Decompress: recover the full (x, y) coordinates from just x + parity bit
+      // ethers.SigningKey.computePublicKey(key, false) returns:
+      // 0x04 + x-coordinate (32 bytes) + y-coordinate (32 bytes) = 65 bytes
+      uncompressedPubKey = ethers.SigningKey.computePublicKey(compressedHex, false);
+      console.log('✅ Decompressed to uncompressed format (65 bytes)');
+    } else if (keyBytes.length === 64) {
+      // Uncompressed without 0x04 prefix - add it
+      uncompressedPubKey = '0x04' + hex;
+    } else if (keyBytes.length === 65) {
+      // Already in uncompressed format with 0x04 prefix
+      uncompressedPubKey = '0x' + hex;
+    } else {
+      throw new Error(`Unexpected public key length: ${keyBytes.length} bytes`);
+    }
+
+    // STEP 2: Derive Ethereum address
+    // ethers.computeAddress() does:
+    //   1. Remove 0x04 prefix → 64 bytes
+    //   2. KECCAK256 hash → 32 bytes
+    //   3. Take last 20 bytes → address
+    //   4. Apply EIP-55 checksum encoding → final address
+    const ethereumAddress = ethers.computeAddress(uncompressedPubKey);
+
+    console.log('✅ Ethereum address derived:', ethereumAddress);
+    return ethereumAddress;
   } catch (error) {
-    console.error('Error deriving Ethereum address:', error);
+    console.error('❌ Error deriving Ethereum address:', error);
     return 'Invalid public key';
   }
 }
@@ -160,8 +215,36 @@ export function deriveNearAddress(publicKey: string): string {
 /**
  * Derive addresses for all compatible chains based on curve type
  *
+ * IMPORTANT CONCEPT - Signature Recovery (from console3.md):
+ * =========================================================
+ * When you sign a transaction, the signature can recover to 2 possible addresses
+ * depending on the recovery value (v):
+ *
+ *                MESSAGE HASH
+ *                     ↓
+ *        ┌────────────┴────────────┐
+ *        │                         │
+ *    v=0 (even Y)             v=1 (odd Y)
+ *        │                         │
+ *        ↓                         ↓
+ *   Public Key A             Public Key B
+ *        │                         │
+ *        ↓                         ↓
+ *   Address A                Address B
+ *
+ * Only ONE of these is the real signer! The v value tells us which.
+ *
+ * This is why:
+ * 1. We need to TEST both v values when constructing the signed transaction
+ * 2. We find which v recovers to the address derived from public_output
+ * 3. We use that v in the final signature
+ *
+ * If the signature doesn't recover to the expected address with either v value,
+ * it means the MPC signing used a different private key (BUG!).
+ *
  * @param publicKey - The public key already extracted using publicKeyFromDWalletOutput()
  * @param curve - The curve type (0 = SECP256K1, 1 = ED25519)
+ * @returns Object mapping chain names to their addresses
  */
 export function deriveChainAddresses(publicKey: string, curve: number): { [chain: string]: string } {
   console.log('🎯 deriveChainAddresses called:');

@@ -167,10 +167,17 @@ async function buildEVMTransaction(
 
   // Serialize for signing
   const tx = ethers.Transaction.from(unsignedTx);
-  const serialized = tx.unsignedSerialized;
-  const messageBytes = new Uint8Array(Buffer.from(serialized.slice(2), 'hex'));
 
-  console.log(`✅ EVM transaction built: ${messageBytes.length} bytes`);
+  // CRITICAL: Following ika-dwallet1 working implementation (integration.js line 840)
+  // Pass the HASH of the serialized transaction to dWallet, NOT the raw bytes!
+  // The Ika MPC expects: ethers.getBytes(ethers.keccak256(serializedTx))
+  const serializedTx = tx.unsignedSerialized;  // Raw RLP-encoded bytes
+  const txHash = ethers.keccak256(serializedTx);  // Hash it first
+  const messageBytes = ethers.getBytes(txHash);  // Convert hash to bytes
+
+  console.log(`✅ EVM transaction built: ${messageBytes.length} bytes (keccak256 hash)`);
+  console.log(`📋 Serialized tx: ${serializedTx.substring(0, 40)}...`);
+  console.log(`📋 Transaction hash: ${txHash}`);
 
   return { messageBytes, unsignedTx };
 }
@@ -270,21 +277,21 @@ export async function signWithDWallet(
     ? Curve.ED25519
     : Curve.SECP256K1;
 
-  // CRITICAL: Get encryption seed from localStorage
-  // The seed was stored during dWallet creation and MUST be the same for decryption
+  // CRITICAL: Get encryption seed - regenerate deterministically from Sui address + curve
+  // Since seed is deterministic, we can always regenerate it
+  const { ethers } = await import('ethers');
+
+  const curveString = curve === Curve.SECP256K1 ? 'secp256k1' : 'ed25519';
+  const seedString = `ika-dwallet-${params.signerAddress}-${curveString}`;
+  const seedHash = ethers.keccak256(ethers.toUtf8Bytes(seedString));
+  const encryptionSeed = ethers.getBytes(seedHash);
+
+  console.log('✅ Regenerated DETERMINISTIC encryption seed from Sui address + curve');
+  console.log(`🔐 Seed formula: KECCAK256("ika-dwallet-${params.signerAddress}-${curveString}")`);
+
+  // Also store in localStorage for reference (optional)
   const encryptionSeedKey = `dwallet_encryption_seed_${params.dwalletId}`;
-  const encryptionSeedArray = localStorage.getItem(encryptionSeedKey);
-
-  if (!encryptionSeedArray) {
-    throw new Error(
-      `Encryption seed not found for dWallet ${params.dwalletId}. ` +
-      'This dWallet may have been created in a different browser or the data was cleared. ' +
-      'You can only sign transactions with dWallets you created in this browser.'
-    );
-  }
-
-  const encryptionSeed = new Uint8Array(JSON.parse(encryptionSeedArray));
-  console.log('✅ Retrieved encryption seed from localStorage');
+  localStorage.setItem(encryptionSeedKey, JSON.stringify(Array.from(encryptionSeed)));
 
   // Initialize client-side signing
   const { ikaClient, userShareEncryptionKeys } = await initializeClientSideSigning(
@@ -295,6 +302,7 @@ export async function signWithDWallet(
 
   // Fetch dWallet from blockchain to get public key
   console.log('📡 Fetching dWallet from blockchain...');
+  console.log('🆔 dWallet ID:', params.dwalletId);
   const dWallet = await ikaClient.getDWallet(params.dwalletId);
   console.log('✅ dWallet fetched');
 
@@ -304,52 +312,61 @@ export async function signWithDWallet(
   if (dWallet.state.$kind === 'Active') {
     const pubOutputBytes = (dWallet.state as any).Active?.public_output;
     if (pubOutputBytes && Array.isArray(pubOutputBytes)) {
+      console.log('🔍 Raw public_output from blockchain:', pubOutputBytes.slice(0, 10), '... (first 10 bytes)');
+      console.log('🔍 Full public_output length:', pubOutputBytes.length, 'bytes');
+
       const { publicKeyFromDWalletOutput } = await import('@ika.xyz/sdk');
       const actualPublicKey = await publicKeyFromDWalletOutput(
         curve,
         Uint8Array.from(pubOutputBytes)
       );
+
+      console.log('🔍 After publicKeyFromDWalletOutput:');
+      console.log('   Raw bytes:', Array.from(actualPublicKey.slice(0, 10)), '... (first 10 bytes)');
+      console.log('   Length:', actualPublicKey.length, 'bytes');
+
       const publicKeyHex = '0x' + Buffer.from(actualPublicKey).toString('hex');
-      console.log('🔑 Public key:', publicKeyHex);
+      console.log('🔑 Public key hex:', publicKeyHex);
       console.log('🔑 Public key length:', actualPublicKey.length, 'bytes');
 
       // Derive address from public key based on curve
       if (curve === Curve.SECP256K1) {
-        // For EVM chains, derive Ethereum address
-        const { computeAddress } = await import('ethers');
+        // For EVM chains, derive Ethereum address using the official ethers.js method
+        const { computeAddress, SigningKey } = await import('ethers');
 
-        // computeAddress expects uncompressed public key (65 bytes with 0x04 prefix)
-        let keyForAddress: string;
+        console.log('');
+        console.log('🎯 ETHEREUM ADDRESS DERIVATION (following console3.md logic)');
+        console.log('═══════════════════════════════════════════════════════');
+
+        let uncompressedPubKey: string;
 
         if (actualPublicKey.length === 33) {
-          console.log('📝 Public key is compressed (33 bytes), decompressing...');
+          // Compressed public key (33 bytes) - decompress using ethers.SigningKey
+          const compressedHex = '0x' + Buffer.from(actualPublicKey).toString('hex');
+          console.log('📝 Compressed public key (33 bytes):', compressedHex);
 
-          // Decompress using @noble/secp256k1
-          const secp = await import('@noble/secp256k1');
-          const pubKeyHexNoPrefix = Buffer.from(actualPublicKey).toString('hex');
-
-          // Point.fromHex returns a Point, use toHex(false) to get uncompressed format
-          const point = secp.Point.fromHex(pubKeyHexNoPrefix);
-          const uncompressedHex = point.toHex(false); // false = uncompressed (130 hex chars = 65 bytes)
-
-          keyForAddress = '0x' + uncompressedHex;
-
-          console.log('✅ Decompressed to uncompressed public key');
-          console.log('📝 Uncompressed key length:', uncompressedHex.length / 2, 'bytes');
+          // Method from console3.md line 68:
+          // const uncompressedPubKey = ethers.SigningKey.computePublicKey(compressedPubKey, false);
+          uncompressedPubKey = SigningKey.computePublicKey(compressedHex, false);
+          console.log('✅ Decompressed to uncompressed (65 bytes):', uncompressedPubKey.substring(0, 20) + '...');
         } else if (actualPublicKey.length === 64) {
-          console.log('📝 Public key is uncompressed without prefix (64 bytes), adding 0x04 prefix');
-          keyForAddress = '0x04' + publicKeyHex.slice(2);
+          // Uncompressed without 0x04 prefix - add it
+          console.log('📝 Public key is uncompressed without prefix (64 bytes)');
+          uncompressedPubKey = '0x04' + publicKeyHex.slice(2);
         } else if (actualPublicKey.length === 65) {
-          console.log('📝 Public key is already uncompressed with prefix (65 bytes)');
-          keyForAddress = publicKeyHex;
+          // Already uncompressed with 0x04 prefix
+          console.log('📝 Public key is already uncompressed (65 bytes)');
+          uncompressedPubKey = publicKeyHex;
         } else {
           throw new Error(`Unexpected public key length: ${actualPublicKey.length} bytes`);
         }
 
-        fromAddress = computeAddress(keyForAddress);
-        console.log('');
-        console.log('═══════════════════════════════════════════════════════');
-        console.log('🏠 DERIVED ETHEREUM ADDRESS:', fromAddress);
+        // Derive address using ethers.computeAddress (does KECCAK256 + last 20 bytes automatically)
+        // This matches console3.md line 72:
+        // const address = ethers.computeAddress(uncompressedPubKey);
+        fromAddress = computeAddress(uncompressedPubKey);
+
+        console.log('✅ Derived Ethereum address:', fromAddress);
         console.log('═══════════════════════════════════════════════════════');
         console.log('');
       } else if (curve === Curve.ED25519) {
@@ -1053,16 +1070,89 @@ export async function signWithDWallet(
     console.log('');
   } else {
     // For EVM chains, attach ECDSA signature to transaction
-    const tx = ethers.Transaction.from(unsignedTx);
-    tx.signature = signatureHex;
-    serialized = tx.serialized;
-    hash = tx.hash || '0x';
+    // ECDSA signatures need the correct recovery value (yParity) to derive the correct address
+
+    console.log('🔐 Processing ECDSA signature for EVM transaction...');
+    console.log('📋 Expected sender address:', fromAddress);
+    console.log('📋 Signature hex:', signatureHex);
+    console.log('📋 Signature length:', signatureHex.length - 2, 'bytes');
+
+    // Extract r and s from signature
+    const r = '0x' + signatureHex.slice(2, 66);
+    const s = '0x' + signatureHex.slice(66, 130);
+    console.log('📋 r:', r);
+    console.log('📋 s:', s);
+
+    // IMPORTANT: Test both recovery values (v=27 and v=28) to find which recovers to the expected address
+    // The correct v value depends on the y-coordinate of the public key point
+    console.log('');
+    console.log('🔍 Testing recovery values to find correct signature...');
+    console.log('📋 Expected address from public_output:', fromAddress);
+    console.log('');
+
+    // Try both v values and find the one that matches the expected address
+    let signedTx: any = null;
+    let actualSenderAddress: string | null = null;
+    let matchedV: number | null = null;
+
+    for (const v of [27, 28]) {
+      const testTx = ethers.Transaction.from(unsignedTx);
+      testTx.signature = ethers.Signature.from({ r, s, v });
+
+      const recoveredFrom = testTx.from;
+      console.log(`🔍 Testing v=${v} (yParity=${v - 27}), recovered: ${recoveredFrom}`);
+
+      // Check if this v value recovers to the expected address
+      if (recoveredFrom?.toLowerCase() === fromAddress.toLowerCase()) {
+        console.log(`✅ Found correct recovery id (v): ${v - 27} (EIP-155 v: ${v})`);
+        signedTx = testTx;
+        actualSenderAddress = recoveredFrom;
+        matchedV = v;
+        break;
+      }
+    }
+
+    // If no match found, use v=27 as fallback
+    if (!signedTx) {
+      console.log('⚠️  No matching recovery id found, using v=27 as fallback');
+      const fallbackTx = ethers.Transaction.from(unsignedTx);
+      fallbackTx.signature = ethers.Signature.from({ r, s, v: 27 });
+      signedTx = fallbackTx;
+      actualSenderAddress = fallbackTx.from;
+      matchedV = 27;
+    }
+
+    console.log('');
+    console.log('═══════════════════════════════════════════════════════');
+    console.log('✅ SIGNATURE VERIFICATION');
+    console.log('═══════════════════════════════════════════════════════');
+    console.log('📋 Transaction will be sent from:', actualSenderAddress);
+    console.log('📋 Expected address from public_output:', fromAddress);
+    console.log('📋 Used recovery value (v):', matchedV);
+    if (actualSenderAddress?.toLowerCase() === fromAddress.toLowerCase()) {
+      console.log('');
+      console.log('✅ SUCCESS: Signature recovers to expected address!');
+      console.log('💚 The transaction will be sent from the correct dWallet address.');
+    } else {
+      console.log('');
+      console.log('⚠️  WARNING: These addresses DO NOT MATCH!');
+      console.log('❌ Signature recovery failed - transaction may be rejected.');
+      console.log('💰 Make sure to fund the ACTUAL sender address above!');
+    }
+    console.log('═══════════════════════════════════════════════════════');
+    console.log('');
+
+    const finalTx = signedTx;
+
+    serialized = finalTx.serialized;
+    hash = finalTx.hash || '0x';
 
     console.log('');
     console.log('═══════════════════════════════════════════════════════');
     console.log('🎉 TRANSACTION SIGNED SUCCESSFULLY!');
     console.log('═══════════════════════════════════════════════════════');
     console.log('Transaction Hash:', hash);
+    console.log('Sender Address:', finalTx.from);
     console.log('');
     console.log('📝 FULL SIGNED TRANSACTION (ready to broadcast):');
     console.log(serialized);

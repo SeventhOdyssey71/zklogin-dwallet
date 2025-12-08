@@ -91,15 +91,21 @@ export default function CreatePage() {
       const curve = walletType === 'ECDSA' ? Curve.SECP256K1 : Curve.ED25519;
       console.log('📐 Using curve:', curve);
 
-      // Step 4: Generate encryption keypair for user share
-      // IMPORTANT: Use a UNIQUE seed for each dWallet to avoid encryption key registration conflicts
-      // We generate a random seed and combine it with the session identifier for uniqueness
-      // The encryption key address will be stored in localStorage for later activation
-      const sessionIdentifierBytes = createRandomSessionIdentifier();
-      const encryptionSeed = new Uint8Array([...sessionIdentifierBytes, ...new TextEncoder().encode(`ika-dwallet-${account.address}`)]);
+      // Step 4: Generate DETERMINISTIC encryption keypair for user share
+      // Use deterministic seed based on Sui address AND curve type
+      // Different curves need different encryption keys registered in the coordinator
+      // Random session identifiers ensure each dWallet has unique private key via DKG
+      const { ethers } = await import('ethers');
 
-      console.log('🔐 Generating unique encryption keys for this dWallet');
-      console.log('🔐 Seed includes session identifier for uniqueness');
+      const curveString = walletType === 'ECDSA' ? 'secp256k1' : 'ed25519';
+      const seedString = `ika-dwallet-${account.address}-${curveString}`;
+      const seedHash = ethers.keccak256(ethers.toUtf8Bytes(seedString));
+      const encryptionSeed = ethers.getBytes(seedHash);
+
+      const sessionIdentifierBytes = createRandomSessionIdentifier();
+
+      console.log('🔐 Generated DETERMINISTIC encryption seed from Sui address + curve');
+      console.log(`🔐 Seed formula: KECCAK256("ika-dwallet-${account.address}-${curveString}")`);
 
       const userShareEncryptionKeys = await UserShareEncryptionKeys.fromRootSeedKey(
         encryptionSeed,
@@ -109,36 +115,48 @@ export default function CreatePage() {
       console.log('🔐 Generated encryption keys for user share');
       console.log('🔑 Encryption key address:', userShareEncryptionKeys.getSuiAddress());
 
-      // Step 5: Create transaction (matching working server implementation)
+      // Step 5: Create transaction for dWallet (with encryption key registration)
       const tx = new Transaction();
-
-      // Step 6: Create IkaTransaction wrapper FIRST (before defining coins)
       const ikaTx = new IkaTransaction({
         ikaClient,
         transaction: tx,
         userShareEncryptionKeys,
       });
 
-      // NOW define coins AFTER IkaTransaction wrapper
+      // Define coins
       const ikaCoin = tx.object(largestIkaCoin.coinObjectId);
-      const suiCoin = tx.gas; // Use tx.gas directly, don't split
+      const suiCoin = tx.gas;
 
-      // Register the session identifier (already created above)
+      // Register the session identifier
       const sessionIdentifier = ikaTx.registerSessionIdentifier(sessionIdentifierBytes);
 
       console.log('📝 Session identifier:', Array.from(sessionIdentifierBytes));
       console.log('📝 Session identifier registered');
       console.log('🔍 Transaction after session registration:', tx.getData().commands?.length, 'commands');
-      console.log('🔍 Commands:', JSON.stringify(tx.getData().commands, null, 2));
 
-      // Step 7: Register encryption key for this dWallet
-      // Since we use unique encryption keys for each dWallet (based on session identifier),
-      // we always register a new encryption key
-      console.log('📝 Registering unique encryption key for this dWallet...');
-      await ikaTx.registerEncryptionKey({ curve });
-      console.log('✅ Encryption key registration added to transaction');
-      console.log('🔍 Transaction after encryption key registration:', tx.getData().commands?.length, 'commands');
-      console.log('🔍 Commands:', JSON.stringify(tx.getData().commands, null, 2));
+      // Step 6: Check if encryption key is already registered on-chain
+      const encryptionKeyAddress = userShareEncryptionKeys.getSuiAddress();
+      console.log(`🔍 Checking if encryption key is registered for: ${encryptionKeyAddress}`);
+
+      let needsRegistration = true;
+      try {
+        await ikaClient.getActiveEncryptionKey(encryptionKeyAddress);
+        console.log('✅ Encryption key already registered on-chain, skipping...');
+        needsRegistration = false;
+      } catch (error: any) {
+        if (error.message?.includes('not found') || error.name === 'ObjectNotFoundError') {
+          console.log('📝 Encryption key not found, will register...');
+          needsRegistration = true;
+        } else {
+          console.log('⚠️  Error checking encryption key, will try to register:', error.message);
+          needsRegistration = true;
+        }
+      }
+
+      if (needsRegistration) {
+        await ikaTx.registerEncryptionKey({ curve });
+        console.log('✅ Encryption key registration added to transaction');
+      }
 
       // Get the latest network encryption key since we just added registration
       const latestNetworkKey = await ikaClient.getLatestNetworkEncryptionKey();

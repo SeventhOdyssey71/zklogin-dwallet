@@ -59,6 +59,39 @@ export default function WalletDetailPage() {
     loadWallet();
   }, [walletId]);
 
+  const refreshBalances = async () => {
+    if (!wallet) return;
+
+    try {
+      console.log('🔄 Refreshing balances...');
+
+      // Derive chain-specific addresses from public key
+      const chainAddresses = deriveChainAddresses(wallet.publicKey, wallet.curve === 'SECP256K1' ? 0 : 2);
+
+      // Fetch real balances from testnets
+      const realBalances = await fetchAllBalances(chainAddresses, wallet.curve === 'SECP256K1' ? 0 : 2);
+
+      // Update wallet balances
+      const updatedBalances = wallet.balances.map(b => {
+        const balanceData = realBalances[b.chain] || { balance: '0', usdValue: 0 };
+        return {
+          ...b,
+          balance: balanceData.balance,
+          usdValue: balanceData.usdValue,
+        };
+      });
+
+      setWallet({
+        ...wallet,
+        balances: updatedBalances,
+      });
+
+      console.log('✅ Balances refreshed');
+    } catch (error) {
+      console.error('Failed to refresh balances:', error);
+    }
+  };
+
   const loadWallet = async () => {
     setIsLoading(true);
     try {
@@ -890,7 +923,8 @@ export default function WalletDetailPage() {
                   encryptedShareId={wallet?.encryptedShareId || ''}
                   onTransactionComplete={() => {
                     setIsSendDialogOpen(false);
-                    // Don't refresh - let user manually refresh to see updated balance
+                    // Refresh balances after transaction
+                    refreshBalances();
                   }}
                 />
               </div>

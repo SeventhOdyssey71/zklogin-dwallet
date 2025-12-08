@@ -4,6 +4,7 @@ import React, { useState } from 'react';
 import { Send, Loader2 } from 'lucide-react';
 import { useCurrentAccount, useSuiClient, useSignAndExecuteTransaction } from '@mysten/dapp-kit';
 import { signWithDWallet, broadcastTransaction } from '@/lib/dwallet/clientSideSigning';
+import { toast } from 'sonner';
 
 interface SendTransactionProps {
   chain: string;
@@ -137,6 +138,12 @@ export function SendTransaction({
 
       console.log('✅ Transaction broadcasted:', broadcastResult.txHash);
 
+      // Show success toast
+      toast.success('Transaction sent successfully!', {
+        description: `Hash: ${broadcastResult.txHash.substring(0, 20)}...`,
+        duration: 5000,
+      });
+
       setSuccess(`Transaction sent successfully! Hash: ${broadcastResult.txHash.substring(0, 20)}...`);
       setRecipient('');
       setAmount('');
@@ -149,6 +156,13 @@ export function SendTransaction({
 
     } catch (err: any) {
       console.error('❌ Transaction failed:', err);
+
+      // Show error toast
+      toast.error('Transaction failed', {
+        description: err.message || 'An error occurred',
+        duration: 5000,
+      });
+
       setError(err.message || 'Transaction failed');
       setStatusMessage('');
     } finally {
