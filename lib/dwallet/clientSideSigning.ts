@@ -296,10 +296,6 @@ export async function signWithDWallet(
   console.log('✅ Regenerated DETERMINISTIC encryption seed from Sui address + curve');
   console.log(`🔐 Seed formula: KECCAK256("ika-dwallet-${suiAddress}-${curveString}")`);
 
-  // Also store in localStorage for reference (optional)
-  const encryptionSeedKey = `dwallet_encryption_seed_${params.dwalletId}`;
-  localStorage.setItem(encryptionSeedKey, JSON.stringify(Array.from(encryptionSeed)));
-
   // Initialize client-side signing
   const { ikaClient, userShareEncryptionKeys } = await initializeClientSideSigning(
     params.suiClient,
