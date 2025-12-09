@@ -185,15 +185,8 @@ export async function fetchBitcoinBalance(address: string): Promise<{ balance: s
   }
 
   try {
-    // Add timeout to fetch request
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
-
-    // Using Blockstream API for Bitcoin testnet
-    const response = await fetch(`https://blockstream.info/testnet/api/address/${address}`, {
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
+    // Use our API route to avoid CORS issues
+    const response = await fetch(`/api/bitcoin-balance?address=${encodeURIComponent(address)}`);
 
     if (!response.ok) {
       throw new Error(`Bitcoin API returned ${response.status}`);
@@ -201,20 +194,19 @@ export async function fetchBitcoinBalance(address: string): Promise<{ balance: s
 
     const data = await response.json();
 
-    // Calculate balance: funded (received) - spent
-    const funded = data.chain_stats?.funded_txo_sum || 0;
-    const spent = data.chain_stats?.spent_txo_sum || 0;
-    const satoshis = funded - spent;
-    const balance = (satoshis / 1e8).toFixed(8); // Convert satoshis to BTC
-
-    console.log(`✅ Bitcoin balance: ${balance} BTC (${satoshis} sats)`);
+    console.log(`✅ Bitcoin balance: ${data.balance} BTC (${data.satoshis} sats)`);
 
     return {
-      balance,
+      balance: data.balance,
       usdValue: 0,
     };
   } catch (error) {
-    console.error('❌ Bitcoin balance fetch failed:', error instanceof Error ? error.message : 'Unknown error');
+    // Ignore abort errors (caused by React Strict Mode double-mounting in development)
+    if (error instanceof Error && error.name === 'AbortError') {
+      console.log('⏸️  Bitcoin balance fetch cancelled (component unmounted)');
+    } else {
+      console.error('❌ Bitcoin balance fetch failed:', error instanceof Error ? error.message : 'Unknown error');
+    }
     return {
       balance: '0',
       usdValue: 0,
