@@ -131,20 +131,32 @@ export function SendTransaction({
       });
 
       console.log('✅ Transaction signed:', signedTx.hash);
-      setStatusMessage('Broadcasting transaction...');
 
-      // Broadcast to blockchain
-      const broadcastResult = await broadcastTransaction(chain, signedTx.serialized!);
+      let finalTxHash: string;
 
-      console.log('✅ Transaction broadcasted:', broadcastResult.txHash);
+      // For chains like Polkadot that broadcast during signing,
+      // serialized will be undefined and txHash will already be set
+      if (signedTx.serialized) {
+        setStatusMessage('Broadcasting transaction...');
+
+        // Broadcast to blockchain
+        const broadcastResult = await broadcastTransaction(chain, signedTx.serialized);
+
+        console.log('✅ Transaction broadcasted:', broadcastResult.txHash);
+        finalTxHash = broadcastResult.txHash;
+      } else {
+        // Transaction already broadcast during signing
+        console.log('✅ Transaction already broadcast during signing:', signedTx.txHash);
+        finalTxHash = signedTx.txHash || signedTx.hash;
+      }
 
       // Show success toast
       toast.success('Transaction sent successfully!', {
-        description: `Hash: ${broadcastResult.txHash.substring(0, 20)}...`,
+        description: `Hash: ${finalTxHash.substring(0, 20)}...`,
         duration: 5000,
       });
 
-      setSuccess(`Transaction sent successfully! Hash: ${broadcastResult.txHash.substring(0, 20)}...`);
+      setSuccess(`Transaction sent successfully! Hash: ${finalTxHash.substring(0, 20)}...`);
       setRecipient('');
       setAmount('');
       setMemo('');

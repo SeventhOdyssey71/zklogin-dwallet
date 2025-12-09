@@ -170,18 +170,39 @@ export async function signWithDWallet(
         console.log('═══════════════════════════════════════════════════════');
         console.log('');
       } else if (curve === Curve.ED25519) {
-        // For Solana, the public key IS the address (base58 encoded)
+        // ED25519 chains: Solana, Polkadot, Cardano, NEAR
         if (actualPublicKey.length !== 32) {
           throw new Error(`Unexpected ED25519 public key length: ${actualPublicKey.length} bytes (expected 32)`);
         }
 
-        // Convert to Solana PublicKey and get base58 address
-        const solanaPublicKey = new PublicKey(actualPublicKey);
-        fromAddress = solanaPublicKey.toBase58();
-
         console.log('');
+        console.log(`🎯 ADDRESS DERIVATION FOR ${params.chain}`);
         console.log('═══════════════════════════════════════════════════════');
-        console.log('🏠 DERIVED SOLANA ADDRESS:', fromAddress);
+
+        if (params.chain === 'Solana') {
+          // For Solana, the public key IS the address (base58 encoded)
+          const solanaPublicKey = new PublicKey(actualPublicKey);
+          fromAddress = solanaPublicKey.toBase58();
+          console.log('✅ Derived Solana address:', fromAddress);
+        } else if (params.chain === 'Polkadot') {
+          // For Polkadot, derive SS58 address
+          const { derivePolkadotAddress } = await import('../utils/deriveAddresses');
+          fromAddress = derivePolkadotAddress(publicKeyHex);
+          console.log('✅ Derived Polkadot address:', fromAddress);
+        } else if (params.chain === 'Cardano') {
+          // For Cardano, derive Bech32 address
+          const { deriveCardanoAddress } = await import('../utils/deriveAddresses');
+          fromAddress = deriveCardanoAddress(publicKeyHex);
+          console.log('✅ Derived Cardano address:', fromAddress);
+        } else if (params.chain === 'NEAR') {
+          // For NEAR, use hex implicit account
+          const { deriveNearAddress } = await import('../utils/deriveAddresses');
+          fromAddress = deriveNearAddress(publicKeyHex);
+          console.log('✅ Derived NEAR address:', fromAddress);
+        } else {
+          throw new Error(`Unsupported ED25519 chain: ${params.chain}`);
+        }
+
         console.log('═══════════════════════════════════════════════════════');
         console.log('');
       }
@@ -870,6 +891,14 @@ export async function signWithDWallet(
     console.log('You can broadcast this via Solana RPC sendTransaction');
     console.log('═══════════════════════════════════════════════════════');
     console.log('');
+  } else if (params.chain === 'Polkadot') {
+    // For Polkadot, use the chain signer's broadcast method
+    console.log('🔐 Processing ED25519 signature for Polkadot transaction...');
+
+    const signer = getChainSigner(params.chain);
+    const result = await signer.broadcastTransaction(unsignedTx, signature);
+
+    return result;
   } else {
     // For EVM chains, attach ECDSA signature to transaction
     // ECDSA signatures need the correct recovery value (yParity) to derive the correct address

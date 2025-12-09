@@ -160,19 +160,41 @@ export function deriveSolanaAddress(publicKey: string): string {
 
 /**
  * Derive Polkadot address from ED25519 public key
- * Polkadot uses SS58 encoding with network prefix
+ * Polkadot uses SS58 encoding with Blake2b hash and checksum
+ *
+ * SS58 Format: [prefix][payload][checksum]
+ * - prefix: network identifier (0 for Polkadot, 42 for generic Substrate)
+ * - payload: public key (32 bytes)
+ * - checksum: first 2 bytes of Blake2b-512 hash of [prefix][payload]
  */
 export function derivePolkadotAddress(publicKey: string): string {
   try {
-    // For now, use a simplified version - proper SS58 encoding requires @polkadot/util-crypto
-    // This creates a valid-looking address but may not match actual Polkadot derivation
+    const { blake2b } = require('blakejs');
     const bs58 = require('bs58');
-    const hex = publicKey.startsWith('0x') ? publicKey.slice(2) : publicKey;
-    const bytes = Buffer.from(hex, 'hex');
 
-    // Add Polkadot network prefix (0x00 for generic substrate)
-    const prefixedBytes = Buffer.concat([Buffer.from([0x00]), bytes]);
-    return bs58.encode(prefixedBytes);
+    const hex = publicKey.startsWith('0x') ? publicKey.slice(2) : publicKey;
+    const pubKeyBytes = Buffer.from(hex, 'hex');
+
+    // Polkadot mainnet uses prefix 0
+    const prefix = Buffer.from([0x00]);
+
+    // SS58 prefix constant for checksum calculation
+    const SS58_PREFIX = Buffer.from('SS58PRE');
+
+    // Combine prefix + public key
+    const payload = Buffer.concat([prefix, pubKeyBytes]);
+
+    // Calculate checksum: first 2 bytes of Blake2b-512(SS58PRE + prefix + pubkey)
+    // blakejs returns Uint8Array, convert to Buffer
+    const hashInput = Buffer.concat([SS58_PREFIX, payload]);
+    const hash = Buffer.from(blake2b(hashInput, null, 64)); // 64 bytes = 512 bits
+    const checksum = hash.slice(0, 2);
+
+    // Final address: prefix + pubkey + checksum
+    const address = Buffer.concat([payload, checksum]);
+
+    // Base58 encode
+    return bs58.encode(address);
   } catch (error) {
     console.error('Error deriving Polkadot address:', error);
     return 'Invalid public key';
@@ -181,15 +203,43 @@ export function derivePolkadotAddress(publicKey: string): string {
 
 /**
  * Derive Cardano address from ED25519 public key
- * Cardano uses Bech32 encoding
+ * Cardano uses Bech32 encoding with Blake2b-224 hash
+ *
+ * Cardano Address Structure (Shelley era):
+ * - Type: 1 byte (0x61 for testnet base address with payment key)
+ * - Payment Key Hash: 28 bytes (Blake2b-224 of public key)
+ * - Stake Key Hash: 28 bytes (using same key for simplicity)
+ * - Bech32 encoding with 'addr_test' prefix for testnet
  */
 export function deriveCardanoAddress(publicKey: string): string {
   try {
-    // For now, create a placeholder since proper Cardano address derivation
-    // requires the cardano-serialization-lib
-    // Real Cardano addresses need both payment and stake keys
+    const { blake2b } = require('blakejs');
+    const bech32 = require('bech32');
+
     const hex = publicKey.startsWith('0x') ? publicKey.slice(2) : publicKey;
-    return `addr_test1${hex.substring(0, 54)}`;
+    const pubKeyBytes = Buffer.from(hex, 'hex');
+
+    // Hash the public key using Blake2b-512 and take first 28 bytes (224 bits)
+    // blakejs returns Uint8Array, convert to Buffer
+    const hash512 = Buffer.from(blake2b(pubKeyBytes, null, 64)); // 64 bytes = 512 bits
+    const paymentKeyHash = hash512.slice(0, 28); // Take first 28 bytes
+
+    // For simplicity, use the same key hash for stake key
+    // In production, you'd derive a separate stake key
+    const stakeKeyHash = paymentKeyHash;
+
+    // Address header: 0x01 for testnet base address (payment + stake)
+    // Bits: 0000 (type=base) 0001 (network=testnet)
+    const header = Buffer.from([0x01]);
+
+    // Combine: header + payment key hash + stake key hash
+    const payload = Buffer.concat([header, paymentKeyHash, stakeKeyHash]);
+
+    // Convert to 5-bit groups for bech32
+    const words = bech32.bech32.toWords(payload);
+
+    // Encode with 'addr_test' prefix for Cardano testnet
+    return bech32.bech32.encode('addr_test', words, 1000); // limit=1000 for long addresses
   } catch (error) {
     console.error('Error deriving Cardano address:', error);
     return 'Invalid public key';

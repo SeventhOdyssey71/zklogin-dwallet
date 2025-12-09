@@ -223,7 +223,7 @@ export async function fetchBitcoinBalance(address: string): Promise<{ balance: s
 }
 
 /**
- * Fetch balance for Polkadot testnet (Westend)
+ * Fetch balance for Polkadot testnet (Paseo)
  */
 export async function fetchPolkadotBalance(address: string): Promise<{ balance: string; usdValue: number }> {
   // Skip if address is invalid
@@ -235,15 +235,49 @@ export async function fetchPolkadotBalance(address: string): Promise<{ balance: 
     };
   }
 
-  // Polkadot balance fetching requires @polkadot/api SDK for proper account queries
-  // Direct RPC calls are complex due to storage key encoding requirements
-  // For now, skip balance fetch and return 0
-  console.log(`⏭️ Polkadot balance fetch requires @polkadot/api SDK (returning 0)`);
+  try {
+    const { ApiPromise, WsProvider } = require('@polkadot/api');
 
-  return {
-    balance: '0',
-    usdValue: 0,
-  };
+    // Create WebSocket provider with timeout
+    const provider = new WsProvider(POLKADOT_TESTNET.rpcUrl, false); // false = don't auto-connect
+
+    // Set connection timeout
+    const connectionTimeout = setTimeout(() => {
+      provider.disconnect();
+    }, 10000); // 10 second timeout
+
+    // Connect to the node
+    await provider.connect();
+    clearTimeout(connectionTimeout);
+
+    // Create API instance
+    const api = await ApiPromise.create({ provider });
+
+    // Query account balance
+    const { data: balance } = await api.query.system.account(address);
+
+    // Disconnect from the node
+    await api.disconnect();
+
+    // Balance is in plancks (smallest unit), convert to DOT/PAS
+    // 1 DOT = 10^10 plancks (10 decimal places)
+    const freeBalance = balance.free.toBigInt();
+    const balanceInDOT = Number(freeBalance) / 1e10;
+    const formattedBalance = balanceInDOT.toFixed(6);
+
+    console.log(`✅ Polkadot balance: ${formattedBalance} PAS`);
+
+    return {
+      balance: formattedBalance,
+      usdValue: 0,
+    };
+  } catch (error) {
+    console.error('❌ Polkadot balance fetch failed:', error instanceof Error ? error.message : 'Unknown error');
+    return {
+      balance: '0',
+      usdValue: 0,
+    };
+  }
 }
 
 /**

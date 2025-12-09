@@ -79,9 +79,9 @@ export const SOLANA_TESTNET = {
 };
 
 export const POLKADOT_TESTNET = {
-  name: 'Polkadot Westend',
-  rpcUrl: 'https://westend-rpc.polkadot.io',
-  blockExplorer: 'https://westend.subscan.io',
+  name: 'Paseo AssetHub',
+  rpcUrl: 'wss://sys.ibp.network/asset-hub-paseo',
+  blockExplorer: 'https://assethub-paseo.subscan.io',
 };
 
 export const CARDANO_TESTNET = {
