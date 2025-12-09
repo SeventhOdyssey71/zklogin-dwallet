@@ -232,50 +232,15 @@ export async function fetchPolkadotBalance(address: string): Promise<{ balance: 
     };
   }
 
-  try {
-    // Add timeout to fetch request
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000);
+  // Polkadot balance fetching requires @polkadot/api SDK for proper account queries
+  // Direct RPC calls are complex due to storage key encoding requirements
+  // For now, skip balance fetch and return 0
+  console.log(`⏭️ Polkadot balance fetch requires @polkadot/api SDK (returning 0)`);
 
-    const response = await fetch(POLKADOT_TESTNET.rpcUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'system_account',
-        params: [address],
-      }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-
-    if (!response.ok) {
-      throw new Error(`Polkadot RPC returned ${response.status}`);
-    }
-
-    const data = await response.json();
-
-    if (data.error) {
-      throw new Error(`Polkadot RPC error: ${data.error.message}`);
-    }
-
-    const balance = data.result?.data?.free || 0;
-    const balanceWND = (balance / 1e12).toFixed(6); // Convert to WND (Westend tokens)
-
-    console.log(`✅ Polkadot balance: ${balanceWND} WND`);
-
-    return {
-      balance: balanceWND,
-      usdValue: 0,
-    };
-  } catch (error) {
-    console.error('❌ Polkadot balance fetch failed:', error instanceof Error ? error.message : 'Unknown error');
-    return {
-      balance: '0',
-      usdValue: 0,
-    };
-  }
+  return {
+    balance: '0',
+    usdValue: 0,
+  };
 }
 
 /**
@@ -314,7 +279,11 @@ export async function fetchCardanoBalance(address: string): Promise<{ balance: s
  */
 export async function fetchNearBalance(address: string): Promise<{ balance: string; usdValue: number }> {
   // Skip if address is invalid
-  if (!address || address === 'Invalid public key' || !address.endsWith('.near')) {
+  // NEAR supports both named accounts (alice.near) and implicit accounts (64 char hex)
+  const isNamedAccount = address.endsWith('.near') || address.endsWith('.testnet');
+  const isImplicitAccount = /^[0-9a-f]{64}$/.test(address);
+
+  if (!address || address === 'Invalid public key' || (!isNamedAccount && !isImplicitAccount)) {
     console.log(`⏭️ Skipping NEAR balance fetch for invalid address: ${address}`);
     return {
       balance: '0',
@@ -351,7 +320,15 @@ export async function fetchNearBalance(address: string): Promise<{ balance: stri
     const data = await response.json();
 
     if (data.error) {
-      throw new Error(`NEAR RPC error: ${data.error.message}`);
+      // Account may not exist yet (implicit accounts need funding first)
+      if (data.error.message?.includes('does not exist') || data.error.cause?.name === 'UNKNOWN_ACCOUNT') {
+        console.log(`⏭️ NEAR account not found (needs funding): ${address.slice(0, 16)}...`);
+        return {
+          balance: '0',
+          usdValue: 0,
+        };
+      }
+      throw new Error(`NEAR RPC error: ${data.error.message || 'Unknown error'}`);
     }
 
     const yoctoNear = data.result?.amount || '0';

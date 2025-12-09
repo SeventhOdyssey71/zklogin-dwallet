@@ -198,14 +198,14 @@ export function deriveCardanoAddress(publicKey: string): string {
 
 /**
  * Derive NEAR account ID from ED25519 public key
- * NEAR uses hex-encoded public key
+ * NEAR implicit accounts use the raw hex public key (64 chars, no .near suffix)
  */
 export function deriveNearAddress(publicKey: string): string {
   try {
-    // NEAR implicit account is derived from the public key
-    // Format: hex(public_key).near
+    // NEAR implicit account is just the hex-encoded public key (64 characters)
+    // Named accounts have .near/.testnet suffix, but implicit accounts don't
     const hex = publicKey.startsWith('0x') ? publicKey.slice(2) : publicKey;
-    return `${hex}.near`;
+    return hex;  // Return just the hex, no .near suffix
   } catch (error) {
     console.error('Error deriving NEAR address:', error);
     return 'Invalid public key';

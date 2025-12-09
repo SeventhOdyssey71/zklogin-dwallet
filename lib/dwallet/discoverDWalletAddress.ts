@@ -221,7 +221,7 @@ export async function discoverDWalletEthereumAddress(
 
   // Normalize s to lower half
   const secp256k1N = BigInt('0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141');
-  const secp256k1HalfN = secp256k1N / 2n;
+  const secp256k1HalfN = secp256k1N / BigInt(2);
   let sBigInt = BigInt(s);
   let recoveryOffset = 0;
 

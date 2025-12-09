@@ -1,8 +1,13 @@
 /**
  * Client-Side dWallet Transaction Signing
  *
- * This module enables signing transactions entirely in the browser using dWallet's 2PC-MPC protocol.
- * No backend server required - all cryptographic operations happen client-side.
+ * This module orchestrates the dWallet 2PC-MPC signing process.
+ * Chain-specific logic is delegated to modular chain signers.
+ *
+ * Architecture:
+ * - core/: Shared utilities (encryption, client initialization, types)
+ * - chains/: Chain-specific signing implementations (Ethereum, Solana, etc.)
+ * - clientSideSigning.ts: MPC orchestration and coordination
  */
 
 import { Transaction } from '@mysten/sui/transactions';
@@ -14,248 +19,38 @@ import {
   Curve,
   SignatureAlgorithm,
   Hash,
-  getNetworkConfig
 } from '@ika.xyz/sdk';
 import { ethers } from 'ethers';
-import {
-  Connection,
-  PublicKey,
-  SystemProgram,
-  Transaction as SolanaTransaction,
-  LAMPORTS_PER_SOL,
-  clusterApiUrl
-} from '@solana/web3.js';
+import { PublicKey, Transaction as SolanaTransaction, Connection, clusterApiUrl } from '@solana/web3.js';
 
-export interface SignTransactionParams {
-  dwalletId: string;
-  dwalletCapId: string;
-  encryptedShareId: string;
-  chain: string;
-  recipient: string;
-  amount: string;
-  memo?: string;
-  suiClient: SuiClient;
-  userAccount: any; // Sui wallet account from @mysten/dapp-kit
-  signAndExecuteTransaction: (params: any) => Promise<any>;
-}
+// Import refactored modules
+import { SignTransactionParams, SignedTransactionResult, UnsignedTransaction } from './core/types';
+import { generateDeterministicEncryptionSeed } from './core/encryption';
+import { initializeClientSideSigning } from './core/client';
+import { getChainSigner } from './chains';
 
-export interface SignedTransactionResult {
-  signature: string;
-  hash: string;
-  txHash: string;
-  serialized?: string;
-}
-
-/**
- * Step 1: Initialize IkaClient and UserShareEncryptionKeys
- *
- * IMPORTANT: The user needs to provide their encryption seed.
- * This could be:
- * - Derived from their Sui wallet signature (sign a message)
- * - Stored encrypted in localStorage (encrypted with wallet signature)
- * - Entered by user (like a password)
- */
-export async function initializeClientSideSigning(
-  suiClient: SuiClient,
-  encryptionSeed: Uint8Array,
-  curve: Curve
-): Promise<{
-  ikaClient: IkaClient;
-  userShareEncryptionKeys: UserShareEncryptionKeys;
-}> {
-  console.log('🔧 Initializing client-side signing...');
-
-  // Initialize IkaClient
-  const ikaClient = new IkaClient({
-    suiClient,
-    config: getNetworkConfig('testnet'), // or 'mainnet'
-    cache: true,
-  });
-  await ikaClient.initialize();
-  console.log('✅ IkaClient initialized');
-
-  // Generate user share encryption keys from seed
-  const userShareEncryptionKeys = await UserShareEncryptionKeys.fromRootSeedKey(
-    encryptionSeed,
-    curve
-  );
-  console.log('✅ User share encryption keys generated');
-
-  return { ikaClient, userShareEncryptionKeys };
-}
+// Re-export types for backwards compatibility
+export type { SignTransactionParams, SignedTransactionResult } from './core/types';
+export { initializeClientSideSigning } from './core/client';
 
 /**
  * Step 2: Build unsigned transaction for the target blockchain
+ *
+ * Delegates to chain-specific signers for transaction building
  */
 export async function buildUnsignedTransaction(
   chain: string,
   recipient: string,
   amount: string,
   fromAddress: string
-): Promise<{ messageBytes: Uint8Array; unsignedTx: any }> {
+): Promise<UnsignedTransaction> {
   console.log(`📝 Building unsigned ${chain} transaction...`);
 
-  switch (chain) {
-    case 'Ethereum':
-    case 'Polygon':
-    case 'Avalanche':
-    case 'BSC':
-      return buildEVMTransaction(chain, recipient, amount, fromAddress);
+  // Get chain-specific signer
+  const signer = getChainSigner(chain);
 
-    case 'Bitcoin':
-      throw new Error('Bitcoin signing not yet implemented in client-side version');
-
-    case 'Solana':
-      return buildSolanaTransaction(recipient, amount, fromAddress);
-
-    default:
-      throw new Error(`Chain ${chain} not supported`);
-  }
-}
-
-/**
- * Build EVM transaction (Ethereum, Polygon, Avalanche, BSC)
- */
-async function buildEVMTransaction(
-  chain: string,
-  recipient: string,
-  amount: string,
-  fromAddress: string
-): Promise<{ messageBytes: Uint8Array; unsignedTx: any }> {
-  // Get chain configuration
-  const chainConfigs: { [key: string]: { chainId: number; rpcUrl: string } } = {
-    'Ethereum': { chainId: 11155111, rpcUrl: 'https://rpc-sepolia.rockx.com' },
-    'Polygon': { chainId: 80002, rpcUrl: 'https://rpc-amoy.polygon.technology' },
-    'Avalanche': { chainId: 43113, rpcUrl: 'https://api.avax-test.network/ext/bc/C/rpc' },
-    'BSC': { chainId: 97, rpcUrl: 'https://bsc-testnet-rpc.publicnode.com' },
-  };
-
-  const config = chainConfigs[chain];
-  if (!config) {
-    throw new Error(`Chain configuration not found for ${chain}`);
-  }
-
-  // Connect to RPC
-  const provider = new ethers.JsonRpcProvider(config.rpcUrl);
-
-  // Get nonce
-  const nonce = await provider.getTransactionCount(fromAddress);
-
-  // Convert amount to wei
-  const value = ethers.parseEther(amount);
-
-  // Use fixed gas prices for testnets to avoid RPC returning crazy high values
-  const maxFeePerGas = ethers.parseUnits('10', 'gwei');  // 10 gwei max fee
-  const maxPriorityFeePerGas = ethers.parseUnits('2', 'gwei');  // 2 gwei priority
-
-  console.log('⛽ Using fixed gas prices for testnet:');
-  console.log('   maxFeePerGas:', ethers.formatUnits(maxFeePerGas, 'gwei'), 'gwei');
-  console.log('   maxPriorityFeePerGas:', ethers.formatUnits(maxPriorityFeePerGas, 'gwei'), 'gwei');
-  console.log('   Estimated cost: ~', ethers.formatEther(maxFeePerGas * BigInt(21000)), 'ETH');
-
-  // Build transaction
-  const unsignedTx = {
-    to: recipient,
-    value: value,
-    nonce: nonce,
-    chainId: config.chainId,
-    type: 2, // EIP-1559
-    maxFeePerGas,
-    maxPriorityFeePerGas,
-    gasLimit: BigInt(21000),
-  };
-
-  // Serialize for signing
-  const tx = ethers.Transaction.from(unsignedTx);
-
-  // CRITICAL FIX: Pass RAW serialized transaction to dWallet, NOT the hash!
-  // dWallet will hash it internally with KECCAK256 based on hashScheme parameter
-  // This matches the fixed implementation in integration.js lines 841-848
-  const serializedTx = tx.unsignedSerialized;  // Raw RLP-encoded bytes
-  const messageBytes = ethers.getBytes(serializedTx);  // Pass raw bytes directly
-
-  // For logging: show what the hash SHOULD be after dWallet hashes it
-  const expectedTxHash = ethers.keccak256(serializedTx);
-  console.log(`✅ EVM transaction built: ${messageBytes.length} bytes (raw serialized)`);
-  console.log(`📋 Serialized tx: ${serializedTx.substring(0, 40)}...`);
-  console.log(`📋 Expected tx hash after KECCAK256: ${expectedTxHash}`);
-
-  return { messageBytes, unsignedTx };
-}
-
-/**
- * Build Solana transaction
- */
-async function buildSolanaTransaction(
-  recipient: string,
-  amount: string,
-  fromAddress: string
-): Promise<{ messageBytes: Uint8Array; unsignedTx: any }> {
-  console.log(`📝 Building unsigned Solana transaction...`);
-
-  // Connect to Solana devnet
-  const connection = new Connection(clusterApiUrl('devnet'), 'confirmed');
-
-  // Create public keys
-  const fromPubkey = new PublicKey(fromAddress);
-  const toPubkey = new PublicKey(recipient);
-
-  // Check balance before building transaction
-  const balance = await connection.getBalance(fromPubkey);
-  const balanceSOL = balance / LAMPORTS_PER_SOL;
-  console.log(`💰 Current balance: ${balanceSOL} SOL (${balance} lamports)`);
-
-  // Convert SOL to lamports
-  const lamports = Math.floor(parseFloat(amount) * LAMPORTS_PER_SOL);
-
-  console.log(`💰 Sending ${amount} SOL (${lamports} lamports)`);
-  console.log(`📤 From: ${fromAddress}`);
-  console.log(`📥 To: ${recipient}`);
-
-  // Warn if insufficient balance
-  if (balance < lamports) {
-    console.warn(`⚠️ WARNING: Insufficient balance! Have ${balanceSOL} SOL, need ${amount} SOL`);
-    console.warn(`📋 Request devnet SOL from: https://faucet.solana.com/`);
-  }
-
-  // Get recent blockhash - fetch as late as possible!
-  console.log('⏰ Fetching fresh blockhash NOW (maximum validity window)...');
-  const blockchashStartTime = Date.now();
-  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('finalized');
-  console.log(`✅ Blockhash fetched in ${Date.now() - blockchashStartTime}ms`);
-  console.log(`📋 Blockhash: ${blockhash}`);
-  console.log(`📋 Valid until block height: ${lastValidBlockHeight}`);
-  console.log(`⏰ You have ~150 seconds before this blockhash expires`);
-
-  // Create transaction
-  const transaction = new SolanaTransaction({
-    feePayer: fromPubkey,
-    blockhash,
-    lastValidBlockHeight,
-  });
-
-  // Add transfer instruction
-  transaction.add(
-    SystemProgram.transfer({
-      fromPubkey,
-      toPubkey,
-      lamports,
-    })
-  );
-
-  // Serialize the message for signing
-  const messageBytes = transaction.serializeMessage();
-
-  console.log(`✅ Solana transaction built: ${messageBytes.length} bytes`);
-
-  return {
-    messageBytes,
-    unsignedTx: {
-      transaction,
-      blockhash,
-      lastValidBlockHeight,
-    },
-  };
+  // Delegate to chain signer
+  return await signer.buildUnsignedTransaction(recipient, amount, fromAddress);
 }
 
 /**
@@ -279,22 +74,12 @@ export async function signWithDWallet(
     : Curve.SECP256K1;
 
   // CRITICAL: Get encryption seed - regenerate deterministically from Sui address + curve
-  // Since seed is deterministic, we can always regenerate it
-  const { ethers } = await import('ethers');
-
-  // Extract Sui address from userAccount
   const suiAddress = params.userAccount?.address;
   if (!suiAddress) {
     throw new Error('User account address is required for deterministic seed generation');
   }
 
-  const curveString = curve === Curve.SECP256K1 ? 'secp256k1' : 'ed25519';
-  const seedString = `ika-dwallet-${suiAddress}-${curveString}`;
-  const seedHash = ethers.keccak256(ethers.toUtf8Bytes(seedString));
-  const encryptionSeed = ethers.getBytes(seedHash);
-
-  console.log('✅ Regenerated DETERMINISTIC encryption seed from Sui address + curve');
-  console.log(`🔐 Seed formula: KECCAK256("ika-dwallet-${suiAddress}-${curveString}")`);
+  const encryptionSeed = generateDeterministicEncryptionSeed(suiAddress, curve);
 
   // Initialize client-side signing
   const { ikaClient, userShareEncryptionKeys } = await initializeClientSideSigning(
@@ -439,7 +224,7 @@ export async function signWithDWallet(
   console.log('🔑 Signature algorithm:', signatureAlgorithm);
   console.log('📝 Using requestGlobalPresign (required for regular DKG dWallets)');
 
-  // CRITICAL: requestGlobalPresign return an unverified presign capability
+  // CRITICAL: requestGlobalPresign returns an unverified presign capability
   // We need to TRANSFER this object back to ourselves to get its ID after transaction execution
   const unverifiedPresignCap = presignIkaTx.requestGlobalPresign({
     curve,
@@ -1077,7 +862,7 @@ export async function signWithDWallet(
     // CRITICAL: Normalize s to lower half (EIP-2: s must be in lower half of curve order)
     // This is required for signature malleability protection
     const secp256k1N = BigInt('0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141');
-    const secp256k1HalfN = secp256k1N / 2n;
+    const secp256k1HalfN = secp256k1N / BigInt(2);
 
     let sBigInt = BigInt(s);
     let recoveryOffset = 0;
