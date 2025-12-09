@@ -5,6 +5,7 @@
 import { ChainSigner } from '../core/types';
 import { getEthereumSigner } from './ethereum';
 import { getSolanaSigner } from './solana';
+import { getBitcoinSigner } from './bitcoin';
 
 /**
  * Get a chain signer for the specified blockchain
@@ -22,9 +23,9 @@ export function getChainSigner(chain: string): ChainSigner {
     case 'Solana':
       return getSolanaSigner();
 
-    // Bitcoin (future)
+    // Bitcoin
     case 'Bitcoin':
-      throw new Error('Bitcoin signing not yet implemented');
+      return getBitcoinSigner();
 
     // EdDSA chains (future)
     case 'Polkadot':
@@ -49,6 +50,7 @@ export function isChainSupported(chain: string): boolean {
     'Avalanche',
     'BSC',
     'Solana',
+    'Bitcoin',
   ];
   return supportedChains.includes(chain);
 }
@@ -63,5 +65,6 @@ export function getSupportedChains(): string[] {
     'Avalanche',
     'BSC',
     'Solana',
+    'Bitcoin',
   ];
 }

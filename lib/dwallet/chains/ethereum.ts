@@ -45,14 +45,39 @@ export class EthereumSigner implements ChainSigner {
     // Convert amount to wei
     const value = ethers.parseEther(amount);
 
-    // Use fixed gas prices for testnets to avoid RPC returning crazy high values
-    const maxFeePerGas = ethers.parseUnits('10', 'gwei');  // 10 gwei max fee
-    const maxPriorityFeePerGas = ethers.parseUnits('2', 'gwei');  // 2 gwei priority
+    // Use chain-specific gas prices for testnets
+    // Different chains have different minimum gas requirements
+    let maxFeePerGas: bigint;
+    let maxPriorityFeePerGas: bigint;
 
-    console.log('⛽ Using fixed gas prices for testnet:');
+    switch (this.chain) {
+      case 'Polygon':
+        // Polygon Amoy requires minimum 25 gwei priority fee
+        maxFeePerGas = ethers.parseUnits('50', 'gwei');
+        maxPriorityFeePerGas = ethers.parseUnits('30', 'gwei');
+        break;
+      case 'BSC':
+        // BSC testnet usually needs higher gas
+        maxFeePerGas = ethers.parseUnits('20', 'gwei');
+        maxPriorityFeePerGas = ethers.parseUnits('10', 'gwei');
+        break;
+      case 'Avalanche':
+        // Avalanche Fuji
+        maxFeePerGas = ethers.parseUnits('30', 'gwei');
+        maxPriorityFeePerGas = ethers.parseUnits('2', 'gwei');
+        break;
+      case 'Ethereum':
+      default:
+        // Ethereum Sepolia
+        maxFeePerGas = ethers.parseUnits('10', 'gwei');
+        maxPriorityFeePerGas = ethers.parseUnits('2', 'gwei');
+        break;
+    }
+
+    console.log(`⛽ Using fixed gas prices for ${this.chain} testnet:`);
     console.log('   maxFeePerGas:', ethers.formatUnits(maxFeePerGas, 'gwei'), 'gwei');
     console.log('   maxPriorityFeePerGas:', ethers.formatUnits(maxPriorityFeePerGas, 'gwei'), 'gwei');
-    console.log('   Estimated cost: ~', ethers.formatEther(maxFeePerGas * BigInt(21000)), 'ETH');
+    console.log('   Estimated cost: ~', ethers.formatEther(maxFeePerGas * BigInt(21000)), 'native token');
 
     // Build transaction
     const unsignedTx = {
