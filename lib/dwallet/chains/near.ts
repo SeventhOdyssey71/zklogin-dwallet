@@ -93,7 +93,8 @@ export class NearSigner implements ChainSigner {
       console.log(`✅ Block hash: ${accessKey.block_hash}`);
 
       // Create transfer action
-      const actions = [transactions.transfer(amountInYocto)];
+      // parseNearAmount returns string, but transfer expects bigint
+      const actions = [transactions.transfer(BigInt(amountInYocto))];
 
       // Create transaction
       const transaction = transactions.createTransaction(
@@ -174,7 +175,7 @@ export class NearSigner implements ChainSigner {
         url: NEAR_TESTNET.rpcUrl,
       });
 
-      const result = await provider.sendJsonRpc('broadcast_tx_commit', [signedTxBase64]);
+      const result = await provider.sendJsonRpc('broadcast_tx_commit', [signedTxBase64]) as any;
 
       console.log('✅ Transaction submitted successfully');
       console.log('📋 Result:', result);
