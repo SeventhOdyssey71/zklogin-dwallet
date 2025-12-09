@@ -30,6 +30,8 @@ import { BentoCard } from '@/components/ui/BentoCard';
 import { deriveChainAddresses } from '@/lib/utils/deriveAddresses';
 import { fetchAllBalances } from '@/lib/utils/fetchBalances';
 import { SendTransaction } from '@/components/SendTransaction';
+import { discoverDWalletEthereumAddress } from '@/lib/dwallet/discoverDWalletAddress';
+import { ethers } from 'ethers';
 
 export default function WalletDetailPage() {
   const params = useParams();
@@ -54,6 +56,9 @@ export default function WalletDetailPage() {
     address: string;
     balance: string;
   } | null>(null);
+  const [isDiscovering, setIsDiscovering] = useState(false);
+  const [discoveredAddress, setDiscoveredAddress] = useState<string | null>(null);
+  const [discoveryError, setDiscoveryError] = useState<string | null>(null);
 
   useEffect(() => {
     loadWallet();
@@ -463,6 +468,100 @@ export default function WalletDetailPage() {
     navigator.clipboard.writeText(text);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  };
+
+  const handleDiscoverAddress = async () => {
+    if (!account || !wallet || wallet.type !== 'ECDSA') return;
+
+    setIsDiscovering(true);
+    setDiscoveryError(null);
+    setDiscoveredAddress(null);
+
+    try {
+      console.log('🔍 Starting address discovery for ECDSA dWallet...');
+
+      // Initialize IkaClient
+      const networkConfig = getNetworkConfig('testnet');
+      const ikaClient = new IkaClient({
+        suiClient,
+        config: networkConfig,
+      });
+      await ikaClient.initialize();
+
+      // Generate encryption keys
+      const curve = Curve.SECP256K1;
+      const curveString = 'secp256k1';
+      const seedString = `ika-dwallet-${account.address}-${curveString}`;
+      const seedHash = ethers.keccak256(ethers.toUtf8Bytes(seedString));
+      const encryptionSeed = ethers.getBytes(seedHash);
+
+      const userShareEncryptionKeys = await UserShareEncryptionKeys.fromRootSeedKey(
+        encryptionSeed,
+        curve
+      );
+
+      console.log('✅ Encryption keys generated');
+
+      // Wrap signAndExecuteTransaction to return a Promise with full transaction details
+      const signAndExecuteWrapper = async ({ transaction }: any) => {
+        return new Promise((resolve, reject) => {
+          signAndExecuteTransaction(
+            { transaction },
+            {
+              onSuccess: async (result) => {
+                // Fetch full transaction details including effects and events
+                try {
+                  const txDetails = await suiClient.getTransactionBlock({
+                    digest: result.digest,
+                    options: {
+                      showEffects: true,
+                      showEvents: true,
+                    },
+                  });
+                  resolve(txDetails);
+                } catch (error) {
+                  reject(error);
+                }
+              },
+              onError: (error) => {
+                reject(error);
+              },
+            }
+          );
+        });
+      };
+
+      // Get the expected Ethereum address from wallet's derived addresses
+      const ethereumBalance = wallet.balances.find(b => b.chain === 'Ethereum');
+      const expectedAddress = ethereumBalance?.address !== 'Activate wallet to view address'
+        ? ethereumBalance?.address
+        : undefined;
+
+      console.log('📍 Expected Ethereum address (from public_output[0]):', expectedAddress);
+
+      // Discover the address
+      const address = await discoverDWalletEthereumAddress({
+        dwalletId: walletId,
+        suiClient,
+        ikaClient,
+        userAccount: account,
+        signAndExecuteTransaction: signAndExecuteWrapper,
+        userShareEncryptionKeys,
+        expectedAddress, // Pass the expected address for validation
+      });
+
+      setDiscoveredAddress(address);
+      console.log('✅ Address discovered:', address);
+
+      // Save to localStorage
+      localStorage.setItem(`dwallet_discovered_eth_address_${walletId}`, address);
+
+    } catch (error: any) {
+      console.error('❌ Address discovery failed:', error);
+      setDiscoveryError(error.message || 'Failed to discover address');
+    } finally {
+      setIsDiscovering(false);
+    }
   };
 
   const totalBalance = wallet?.balances.reduce((sum, b) => sum + b.usdValue, 0) || 0;
@@ -890,6 +989,70 @@ export default function WalletDetailPage() {
                 </motion.button>
               </div>
             </BentoCard>
+
+            {/* Discover Ethereum Address - ECDSA Only */}
+            {wallet.type === 'ECDSA' && wallet.status === 'ACTIVE' && (
+              <BentoCard>
+                <h3 className="font-bold mb-2">Discover Actual ETH Address</h3>
+                <p className="text-xs text-zinc-600 dark:text-zinc-400 mb-4">
+                  Sign a test message to find your dWallet's actual Ethereum address. Requires IKA + SUI tokens, no ETH needed.
+                </p>
+
+                <motion.button
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                  onClick={handleDiscoverAddress}
+                  disabled={isDiscovering}
+                  className={`w-full px-4 py-3 rounded-2xl font-medium cursor-hover flex items-center justify-center gap-2 ${
+                    isDiscovering
+                      ? 'bg-zinc-300 dark:bg-zinc-700 text-zinc-500 cursor-not-allowed'
+                      : 'bg-gradient-to-r from-blue-600 to-purple-600 text-white'
+                  }`}
+                >
+                  {isDiscovering ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Discovering...
+                    </>
+                  ) : (
+                    <>
+                      <Zap className="w-4 h-4" />
+                      Discover Address
+                    </>
+                  )}
+                </motion.button>
+
+                {discoveryError && (
+                  <div className="mt-3 p-3 rounded-lg bg-red-100 dark:bg-red-900/30 border border-red-200 dark:border-red-800">
+                    <p className="text-xs text-red-600 dark:text-red-400">
+                      ❌ {discoveryError}
+                    </p>
+                  </div>
+                )}
+
+                {discoveredAddress && (
+                  <div className="mt-3 p-3 rounded-lg bg-green-100 dark:bg-green-900/30 border border-green-200 dark:border-green-800">
+                    <p className="text-xs font-bold text-green-800 dark:text-green-400 mb-2">
+                      ✅ Discovered Address:
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <code className="text-xs font-mono text-green-700 dark:text-green-300 break-all">
+                        {discoveredAddress}
+                      </code>
+                      <button
+                        onClick={() => copyToClipboard(discoveredAddress)}
+                        className="p-1 hover:bg-green-200 dark:hover:bg-green-800 rounded transition-colors cursor-hover flex-shrink-0"
+                      >
+                        {copied ? <Check className="w-3 h-3 text-green-700" /> : <Copy className="w-3 h-3 text-green-700" />}
+                      </button>
+                    </div>
+                    <p className="text-xs text-green-700 dark:text-green-400 mt-2">
+                      💡 Fund this address with ETH to send transactions!
+                    </p>
+                  </div>
+                )}
+              </BentoCard>
+            )}
           </div>
         </div>
 

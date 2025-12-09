@@ -168,16 +168,17 @@ async function buildEVMTransaction(
   // Serialize for signing
   const tx = ethers.Transaction.from(unsignedTx);
 
-  // CRITICAL: Following ika-dwallet1 working implementation (integration.js line 840)
-  // Pass the HASH of the serialized transaction to dWallet, NOT the raw bytes!
-  // The Ika MPC expects: ethers.getBytes(ethers.keccak256(serializedTx))
+  // CRITICAL FIX: Pass RAW serialized transaction to dWallet, NOT the hash!
+  // dWallet will hash it internally with KECCAK256 based on hashScheme parameter
+  // This matches the fixed implementation in integration.js lines 841-848
   const serializedTx = tx.unsignedSerialized;  // Raw RLP-encoded bytes
-  const txHash = ethers.keccak256(serializedTx);  // Hash it first
-  const messageBytes = ethers.getBytes(txHash);  // Convert hash to bytes
+  const messageBytes = ethers.getBytes(serializedTx);  // Pass raw bytes directly
 
-  console.log(`✅ EVM transaction built: ${messageBytes.length} bytes (keccak256 hash)`);
+  // For logging: show what the hash SHOULD be after dWallet hashes it
+  const expectedTxHash = ethers.keccak256(serializedTx);
+  console.log(`✅ EVM transaction built: ${messageBytes.length} bytes (raw serialized)`);
   console.log(`📋 Serialized tx: ${serializedTx.substring(0, 40)}...`);
-  console.log(`📋 Transaction hash: ${txHash}`);
+  console.log(`📋 Expected tx hash after KECCAK256: ${expectedTxHash}`);
 
   return { messageBytes, unsignedTx };
 }
@@ -281,13 +282,19 @@ export async function signWithDWallet(
   // Since seed is deterministic, we can always regenerate it
   const { ethers } = await import('ethers');
 
+  // Extract Sui address from userAccount
+  const suiAddress = params.userAccount?.address;
+  if (!suiAddress) {
+    throw new Error('User account address is required for deterministic seed generation');
+  }
+
   const curveString = curve === Curve.SECP256K1 ? 'secp256k1' : 'ed25519';
-  const seedString = `ika-dwallet-${params.signerAddress}-${curveString}`;
+  const seedString = `ika-dwallet-${suiAddress}-${curveString}`;
   const seedHash = ethers.keccak256(ethers.toUtf8Bytes(seedString));
   const encryptionSeed = ethers.getBytes(seedHash);
 
   console.log('✅ Regenerated DETERMINISTIC encryption seed from Sui address + curve');
-  console.log(`🔐 Seed formula: KECCAK256("ika-dwallet-${params.signerAddress}-${curveString}")`);
+  console.log(`🔐 Seed formula: KECCAK256("ika-dwallet-${suiAddress}-${curveString}")`);
 
   // Also store in localStorage for reference (optional)
   const encryptionSeedKey = `dwallet_encryption_seed_${params.dwalletId}`;
@@ -316,8 +323,11 @@ export async function signWithDWallet(
       console.log('🔍 Full public_output length:', pubOutputBytes.length, 'bytes');
 
       const { publicKeyFromDWalletOutput } = await import('@ika.xyz/sdk');
+
+      console.log(`🔍 Extracting public key for curve: ${curve}`);
+
       const actualPublicKey = await publicKeyFromDWalletOutput(
-        curve,
+        curve,  // Curve enum (Curve.SECP256K1 or Curve.ED25519)
         Uint8Array.from(pubOutputBytes)
       );
 
@@ -397,9 +407,11 @@ export async function signWithDWallet(
     ? SignatureAlgorithm.ECDSASecp256k1
     : SignatureAlgorithm.EdDSA;
 
-  // Hash scheme depends on the curve
-  // ECDSA uses SHA256, EdDSA uses SHA512
-  const hashScheme = curve === Curve.SECP256K1 ? Hash.SHA256 : Hash.SHA512;
+  // Hash scheme depends on the curve and blockchain
+  // Ethereum (SECP256K1 ECDSA) requires KECCAK256
+  // Solana (ED25519 EdDSA) uses SHA512
+  // This must match the hash scheme used in discovery function
+  const hashScheme = curve === Curve.SECP256K1 ? Hash.KECCAK256 : Hash.SHA512;
 
   // === STEP 1: Create Presign Capability ===
   // Do this BEFORE building the transaction to minimize time between blockhash fetch and broadcast
@@ -425,42 +437,21 @@ export async function signWithDWallet(
 
   const ikaCoin = presignTx.object(ikaCoins.data[0].coinObjectId);
 
-  // Check if this is an imported-key dWallet to determine which presign method to use
-  // Per SDK docs (ika-transaction.d.ts lines 212-247):
-  // - requestPresign: for ECDSA(k1,r1) with imported key dwallets
-  // - requestGlobalPresign: for schnorr, schnorrkell, eddsa, taproot, OR regular DKG dwallets
-  const dWalletKind = (dWallet as any).kind;
-  const isImportedKey = dWalletKind === 'imported-key';
-
-  console.log('🔑 dWallet kind:', dWalletKind);
-  console.log('🔑 Is imported key:', isImportedKey);
+  // IMPORTANT: Regular DKG dWallets require requestGlobalPresign (error 31: EOnlyGlobalPresignAllowed)
+  // Only imported-key dWallets can use requestPresign
+  // The SDK docs are incomplete - they don't mention this distinction
   console.log('🔑 Signature algorithm:', signatureAlgorithm);
+  console.log('📝 Using requestGlobalPresign (required for regular DKG dWallets)');
 
-  // CRITICAL: requestPresign/requestGlobalPresign return an unverified presign capability
+  // CRITICAL: requestGlobalPresign return an unverified presign capability
   // We need to TRANSFER this object back to ourselves to get its ID after transaction execution
-  let unverifiedPresignCap: any;
-
-  if (isImportedKey && ((signatureAlgorithm as string) === SignatureAlgorithm.ECDSASecp256k1 ||
-                         (signatureAlgorithm as string) === SignatureAlgorithm.ECDSASecp256r1)) {
-    // For imported-key dWallets with ECDSA
-    console.log('📝 Using requestPresign for imported-key dWallet with ECDSA');
-    unverifiedPresignCap = presignIkaTx.requestPresign({
-      dWallet,
-      signatureAlgorithm,
-      ikaCoin,
-      suiCoin: presignTx.gas,
-    });
-  } else {
-    // For all other cases (regular DKG dWallets, or EdDSA/Schnorr)
-    console.log('📝 Using requestGlobalPresign');
-    unverifiedPresignCap = presignIkaTx.requestGlobalPresign({
-      curve,
-      dwalletNetworkEncryptionKeyId: (dWallet as any).dwallet_network_encryption_key_id,
-      signatureAlgorithm,
-      ikaCoin,
-      suiCoin: presignTx.gas,
-    });
-  }
+  const unverifiedPresignCap = presignIkaTx.requestGlobalPresign({
+    curve,
+    dwalletNetworkEncryptionKeyId: (dWallet as any).dwallet_network_encryption_key_id,
+    signatureAlgorithm,
+    ikaCoin,
+    suiCoin: presignTx.gas,
+  });
 
   // Transfer the presign capability to ourselves so we can get its ID
   presignTx.transferObjects([unverifiedPresignCap], params.userAccount.address);
@@ -717,12 +708,17 @@ export async function signWithDWallet(
   // 2. secretShare + publicOutput directly
   // We'll use option 2 - decrypt the share locally using userShareEncryptionKeys
 
-  let secretShare: Uint8Array | undefined = undefined;
-  let publicOutput: Uint8Array | undefined = undefined;
+  // CRITICAL: Store the encrypted share to pass directly to requestSign
+  // DO NOT decrypt it - the MPC protocol needs the encrypted version
+  let encryptedUserSecretKeyShare: any = undefined;
 
   const dWalletKindFromState = (dWallet as any).kind;
   console.log('🔑 dWallet kind from state:', dWalletKindFromState);
   console.log('🔍 Full dWallet object:', JSON.stringify(dWallet, null, 2));
+
+  // Check if this is an imported-key dWallet
+  const isImportedKey = (dWallet as any).is_imported_key_dwallet === true;
+  console.log('🔑 Is imported-key dWallet:', isImportedKey);
 
   // Check if this dWallet has public_user_secret_key_share (shared dWallet)
   // IMPORTANT: Must check for non-null value, not just !== undefined
@@ -735,30 +731,28 @@ export async function signWithDWallet(
     // For shared dWallets, the share is public on-chain
     // We don't need to decrypt anything - the SDK will use the public share
   } else {
-    // Zero-trust dWallet - we need to decrypt the user share locally
-    console.log('🔓 Decrypting user share locally for zero-trust dWallet...');
+    // Zero-trust dWallet - fetch the ENCRYPTED share (don't decrypt it!)
+    console.log('🔓 Fetching encrypted user share for zero-trust dWallet...');
 
     try {
-      // Get protocol parameters for decryption
-      const protocolParams = await ikaClient.getProtocolPublicParameters(dWallet);
-
-      // If we have the encrypted share ID, fetch and decrypt it
+      // If we have the encrypted share ID, fetch it (DO NOT DECRYPT)
       if (params.encryptedShareId) {
         console.log('Fetching encrypted share:', params.encryptedShareId);
-        const encryptedUserSecretKeyShare = await ikaClient.getEncryptedUserSecretKeyShare(
+        encryptedUserSecretKeyShare = await ikaClient.getEncryptedUserSecretKeyShare(
           params.encryptedShareId
         );
 
-        // Decrypt the share using userShareEncryptionKeys
-        const decrypted = await userShareEncryptionKeys.decryptUserShare(
-          dWallet,
-          encryptedUserSecretKeyShare,
-          protocolParams
-        );
+        // Verify it's in KeyHolderSigned state
+        if (!encryptedUserSecretKeyShare.state.KeyHolderSigned) {
+          console.error('Encrypted share state:', JSON.stringify(encryptedUserSecretKeyShare.state, null, 2));
+          throw new Error(`Encrypted user share is not in KeyHolderSigned state. Current state: ${Object.keys(encryptedUserSecretKeyShare.state)[0]}. Please recreate your dWallet.`);
+        }
 
-        secretShare = decrypted.secretShare;
-        publicOutput = decrypted.verifiedPublicOutput;
-        console.log('✅ User share decrypted successfully');
+        if (!encryptedUserSecretKeyShare.state.KeyHolderSigned.user_output_signature) {
+          throw new Error('User output signature is missing from KeyHolderSigned state. Please recreate your dWallet.');
+        }
+
+        console.log('✅ Encrypted user share loaded and verified (KeyHolderSigned)');
       } else {
         // Try to find the encrypted share from the dWallet's encrypted_user_secret_key_shares Table
         console.log('🔍 Finding encrypted share from dWallet Table...');
@@ -803,20 +797,21 @@ export async function signWithDWallet(
               if (encryptedShareId) {
                 console.log('✅ Found encrypted share ID:', encryptedShareId);
 
-                const encryptedUserSecretKeyShare = await ikaClient.getEncryptedUserSecretKeyShare(
+                encryptedUserSecretKeyShare = await ikaClient.getEncryptedUserSecretKeyShare(
                   encryptedShareId
                 );
 
-                // Decrypt the share
-                const decrypted = await userShareEncryptionKeys.decryptUserShare(
-                  dWallet,
-                  encryptedUserSecretKeyShare,
-                  protocolParams
-                );
+                // Verify it's in KeyHolderSigned state
+                if (!encryptedUserSecretKeyShare.state.KeyHolderSigned) {
+                  console.error('Encrypted share state:', JSON.stringify(encryptedUserSecretKeyShare.state, null, 2));
+                  throw new Error(`Encrypted user share is not in KeyHolderSigned state. Current state: ${Object.keys(encryptedUserSecretKeyShare.state)[0]}. Please recreate your dWallet.`);
+                }
 
-                secretShare = decrypted.secretShare;
-                publicOutput = decrypted.verifiedPublicOutput;
-                console.log('✅ User share decrypted successfully');
+                if (!encryptedUserSecretKeyShare.state.KeyHolderSigned.user_output_signature) {
+                  throw new Error('User output signature is missing from KeyHolderSigned state. Please recreate your dWallet.');
+                }
+
+                console.log('✅ Encrypted user share loaded and verified (KeyHolderSigned)');
               }
             }
           } else {
@@ -826,12 +821,12 @@ export async function signWithDWallet(
           console.error('Failed to query encrypted share table:', searchErr);
         }
 
-        if (!secretShare) {
-          console.warn('⚠️ Could not find or decrypt encrypted share - signing may fail');
+        if (!encryptedUserSecretKeyShare) {
+          console.warn('⚠️ Could not find encrypted share - signing may fail');
         }
       }
     } catch (err) {
-      console.error('Failed to decrypt user share:', err);
+      console.error('Failed to fetch user share:', err);
       throw new Error('Cannot sign without user share. Please ensure your dWallet is properly activated.');
     }
   }
@@ -900,11 +895,11 @@ export async function signWithDWallet(
       suiCoin: signTx.gas,
     };
 
-    // Add secretShare and publicOutput if we decrypted them (for zero-trust dWallets)
-    if (secretShare && publicOutput) {
-      requestSignParams.secretShare = secretShare;
-      requestSignParams.publicOutput = publicOutput;
-      console.log('📝 Using decrypted secretShare and publicOutput');
+    // CRITICAL: Add encryptedUserSecretKeyShare directly (DO NOT decrypt it!)
+    // The MPC protocol requires the encrypted version, not the decrypted share
+    if (encryptedUserSecretKeyShare) {
+      requestSignParams.encryptedUserSecretKeyShare = encryptedUserSecretKeyShare;
+      console.log('📝 Using encrypted user secret key share (NOT decrypted)');
     }
 
     await signIkaTx.requestSign(requestSignParams);
@@ -1077,49 +1072,117 @@ export async function signWithDWallet(
     console.log('📋 Signature hex:', signatureHex);
     console.log('📋 Signature length:', signatureHex.length - 2, 'bytes');
 
-    // Extract r and s from signature
-    const r = '0x' + signatureHex.slice(2, 66);
-    const s = '0x' + signatureHex.slice(66, 130);
-    console.log('📋 r:', r);
-    console.log('📋 s:', s);
+    // Extract r and s from signature (64 bytes total: 32 for r, 32 for s)
+    let r = '0x' + signatureHex.slice(2, 66);
+    let s = '0x' + signatureHex.slice(66, 130);
+    console.log('📋 Raw r:', r);
+    console.log('📋 Raw s:', s);
 
-    // IMPORTANT: Test both recovery values (v=27 and v=28) to find which recovers to the expected address
-    // The correct v value depends on the y-coordinate of the public key point
+    // CRITICAL: Normalize s to lower half (EIP-2: s must be in lower half of curve order)
+    // This is required for signature malleability protection
+    const secp256k1N = BigInt('0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141');
+    const secp256k1HalfN = secp256k1N / 2n;
+
+    let sBigInt = BigInt(s);
+    let recoveryOffset = 0;
+
+    if (sBigInt > secp256k1HalfN) {
+      console.log('⚠️  s value is in upper half, normalizing...');
+      sBigInt = secp256k1N - sBigInt;
+      s = '0x' + sBigInt.toString(16).padStart(64, '0');
+      recoveryOffset = 1; // If we flipped s, we also need to flip v
+      console.log('✅ Normalized s:', s);
+    } else {
+      console.log('✅ s value is already in lower half (normalized)');
+    }
+
     console.log('');
     console.log('🔍 Testing recovery values to find correct signature...');
     console.log('📋 Expected address from public_output:', fromAddress);
+    console.log('📋 Recovery offset:', recoveryOffset);
     console.log('');
 
-    // Try both v values and find the one that matches the expected address
+    // Try both v values with proper recovery offset handling
     let signedTx: any = null;
     let actualSenderAddress: string | null = null;
     let matchedV: number | null = null;
 
-    for (const v of [27, 28]) {
+    // For EIP-1559 (type 2) transactions, v should be 0 or 1 (not 27/28)
+    // We'll use the recovery offset from s-value normalization
+    for (let baseV = 0; baseV <= 1; baseV++) {
+      const v = (baseV + recoveryOffset) % 2;
+      const eip155V = v + 27; // Convert to legacy format for ethers.js
+
       const testTx = ethers.Transaction.from(unsignedTx);
-      testTx.signature = ethers.Signature.from({ r, s, v });
+      testTx.signature = ethers.Signature.from({ r, s, v: eip155V });
 
       const recoveredFrom = testTx.from;
-      console.log(`🔍 Testing v=${v} (yParity=${v - 27}), recovered: ${recoveredFrom}`);
+      console.log(`🔍 Testing baseV=${baseV}, v=${v}, eip155V=${eip155V}, recovered: ${recoveredFrom}`);
 
       // Check if this v value recovers to the expected address
       if (recoveredFrom?.toLowerCase() === fromAddress.toLowerCase()) {
-        console.log(`✅ Found correct recovery id (v): ${v - 27} (EIP-155 v: ${v})`);
+        console.log(`✅ Found correct recovery id (v): ${v} (EIP-155 v: ${eip155V})`);
         signedTx = testTx;
         actualSenderAddress = recoveredFrom;
-        matchedV = v;
+        matchedV = eip155V;
         break;
       }
     }
 
-    // If no match found, use v=27 as fallback
+    // If no match found, try all 4 combinations as last resort
     if (!signedTx) {
-      console.log('⚠️  No matching recovery id found, using v=27 as fallback');
-      const fallbackTx = ethers.Transaction.from(unsignedTx);
-      fallbackTx.signature = ethers.Signature.from({ r, s, v: 27 });
-      signedTx = fallbackTx;
-      actualSenderAddress = fallbackTx.from;
-      matchedV = 27;
+      console.log('⚠️  Standard recovery failed, trying all v combinations...');
+      let foundV: number | null = null;
+      let foundAddress: string | null = null;
+
+      for (let v = 0; v <= 3; v++) {
+        try {
+          // For EIP-1559 transactions, use v directly (0-3)
+          // ethers.js will handle the conversion internally
+          const testTx = ethers.Transaction.from(unsignedTx);
+          testTx.signature = ethers.Signature.from({ r, s, v });
+
+          const recoveredFrom = testTx.from;
+          console.log(`🔍 Trying v=${v}, recovered: ${recoveredFrom}`);
+
+          if (recoveredFrom?.toLowerCase() === fromAddress.toLowerCase()) {
+            signedTx = testTx;
+            foundV = v;
+            foundAddress = recoveredFrom;
+            actualSenderAddress = recoveredFrom;
+            matchedV = v;
+            console.log(`✅ Found working v: ${v}`);
+            break;
+          } else if (foundV === null) {
+            // Keep track of the first valid signature for fallback
+            foundV = v;
+            foundAddress = recoveredFrom;
+          }
+        } catch (e) {
+          // Invalid signature, continue
+          continue;
+        }
+      }
+
+      // If still no match, use the first valid signature we found
+      if (!signedTx && foundV !== null && foundAddress) {
+        console.warn('⚠️  Stored address does not match ANY signature recovery.');
+        console.warn('⚠️  Using recovered address from v=' + foundV + ':', foundAddress);
+
+        const fallbackTx = ethers.Transaction.from(unsignedTx);
+        fallbackTx.signature = ethers.Signature.from({ r, s, v: foundV });
+        signedTx = fallbackTx;
+        actualSenderAddress = foundAddress;
+        matchedV = foundV;
+
+        console.log('');
+        console.log('❌ CRITICAL: Address mismatch detected!');
+        console.log(`   Transaction built for: ${fromAddress}`);
+        console.log(`   Signature recovers to: ${foundAddress}`);
+        console.log('');
+        console.log('⚠️  The transaction nonce may be incorrect for this address!');
+        console.log('💡 You should fund the recovered address and use it instead.');
+      }
     }
 
     console.log('');
