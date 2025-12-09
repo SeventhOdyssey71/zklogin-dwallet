@@ -282,6 +282,7 @@ export async function fetchPolkadotBalance(address: string): Promise<{ balance: 
 
 /**
  * Fetch balance for Cardano testnet (Preview)
+ * Using Koios API (no authentication required)
  */
 export async function fetchCardanoBalance(address: string): Promise<{ balance: string; usdValue: number }> {
   // Skip if address is invalid
@@ -294,12 +295,43 @@ export async function fetchCardanoBalance(address: string): Promise<{ balance: s
   }
 
   try {
-    // Note: Blockfrost requires an API key, so this is a placeholder
-    // For now, return 0 until proper API integration
-    console.log(`⏭️ Cardano balance fetch requires Blockfrost API key (returning 0)`);
+    // Add timeout to fetch request
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+
+    // Use our API route to avoid CORS issues
+    const response = await fetch(`/api/cardano-balance?address=${address}`, {
+      method: 'GET',
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      throw new Error(`Koios API returned ${response.status}`);
+    }
+
+    const data = await response.json();
+
+    // Koios returns an array with address info
+    if (!data || !Array.isArray(data) || data.length === 0) {
+      console.log(`⏭️ Cardano address not found or no data: ${address.slice(0, 20)}...`);
+      return {
+        balance: '0',
+        usdValue: 0,
+      };
+    }
+
+    const addressInfo = data[0];
+
+    // Balance is in lovelace (1 ADA = 1,000,000 lovelace)
+    const lovelace = addressInfo.balance || '0';
+    const balanceInADA = Number(lovelace) / 1e6;
+    const formattedBalance = balanceInADA.toFixed(6);
+
+    console.log(`✅ Cardano balance: ${formattedBalance} tADA (${lovelace} lovelace)`);
 
     return {
-      balance: '0',
+      balance: formattedBalance,
       usdValue: 0,
     };
   } catch (error) {

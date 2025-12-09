@@ -205,8 +205,11 @@ export function derivePolkadotAddress(publicKey: string): string {
  * Derive Cardano address from ED25519 public key
  * Cardano uses Bech32 encoding with Blake2b-224 hash
  *
- * Cardano Address Structure (Shelley era):
- * - Type: 1 byte (0x61 for testnet base address with payment key)
+ * Cardano Address Structure (Shelley era, CIP-19):
+ * - Header: 1 byte [type:4bits][network:4bits]
+ *   - Type 0 = base address (payment + stake key hashes)
+ *   - Network 0 = testnet, Network 1 = mainnet
+ *   - So 0x00 = testnet base address
  * - Payment Key Hash: 28 bytes (Blake2b-224 of public key)
  * - Stake Key Hash: 28 bytes (using same key for simplicity)
  * - Bech32 encoding with 'addr_test' prefix for testnet
@@ -214,32 +217,39 @@ export function derivePolkadotAddress(publicKey: string): string {
 export function deriveCardanoAddress(publicKey: string): string {
   try {
     const { blake2b } = require('blakejs');
-    const bech32 = require('bech32');
+    const { bech32 } = require('bech32');
 
     const hex = publicKey.startsWith('0x') ? publicKey.slice(2) : publicKey;
     const pubKeyBytes = Buffer.from(hex, 'hex');
 
-    // Hash the public key using Blake2b-512 and take first 28 bytes (224 bits)
+    // Hash the public key using Blake2b-224 (28 bytes = 224 bits)
     // blakejs returns Uint8Array, convert to Buffer
-    const hash512 = Buffer.from(blake2b(pubKeyBytes, null, 64)); // 64 bytes = 512 bits
-    const paymentKeyHash = hash512.slice(0, 28); // Take first 28 bytes
+    const paymentKeyHash = Buffer.from(blake2b(pubKeyBytes, null, 28)); // 28 bytes = 224 bits
 
     // For simplicity, use the same key hash for stake key
     // In production, you'd derive a separate stake key
     const stakeKeyHash = paymentKeyHash;
 
-    // Address header: 0x01 for testnet base address (payment + stake)
-    // Bits: 0000 (type=base) 0001 (network=testnet)
-    const header = Buffer.from([0x01]);
+    // Address header: 0x00 for testnet base address (payment + stake)
+    // Bits: 0000 (type=base) 0000 (network=testnet)
+    const header = Buffer.from([0x00]);
 
     // Combine: header + payment key hash + stake key hash
     const payload = Buffer.concat([header, paymentKeyHash, stakeKeyHash]);
 
+    console.log('🔍 Cardano address derivation:');
+    console.log('   Public key length:', pubKeyBytes.length, 'bytes');
+    console.log('   Payment key hash length:', paymentKeyHash.length, 'bytes');
+    console.log('   Total payload length:', payload.length, 'bytes (should be 57)');
+
     // Convert to 5-bit groups for bech32
-    const words = bech32.bech32.toWords(payload);
+    const words = bech32.toWords(payload);
 
     // Encode with 'addr_test' prefix for Cardano testnet
-    return bech32.bech32.encode('addr_test', words, 1000); // limit=1000 for long addresses
+    const address = bech32.encode('addr_test', words, 1000); // limit=1000 for long addresses
+    console.log('   ✅ Cardano testnet address:', address);
+
+    return address;
   } catch (error) {
     console.error('Error deriving Cardano address:', error);
     return 'Invalid public key';
