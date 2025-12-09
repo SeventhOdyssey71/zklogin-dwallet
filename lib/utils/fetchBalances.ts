@@ -201,10 +201,13 @@ export async function fetchBitcoinBalance(address: string): Promise<{ balance: s
 
     const data = await response.json();
 
-    const satoshis = data.chain_stats?.funded_txo_sum || 0;
+    // Calculate balance: funded (received) - spent
+    const funded = data.chain_stats?.funded_txo_sum || 0;
+    const spent = data.chain_stats?.spent_txo_sum || 0;
+    const satoshis = funded - spent;
     const balance = (satoshis / 1e8).toFixed(8); // Convert satoshis to BTC
 
-    console.log(`✅ Bitcoin balance: ${balance} BTC`);
+    console.log(`✅ Bitcoin balance: ${balance} BTC (${satoshis} sats)`);
 
     return {
       balance,

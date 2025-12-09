@@ -96,6 +96,7 @@ export async function signWithDWallet(
 
   // Extract public key and derive address
   let fromAddress = '';
+  let publicKeyHex = '';
 
   if (dWallet.state.$kind === 'Active') {
     const pubOutputBytes = (dWallet.state as any).Active?.public_output;
@@ -116,48 +117,56 @@ export async function signWithDWallet(
       console.log('   Raw bytes:', Array.from(actualPublicKey.slice(0, 10)), '... (first 10 bytes)');
       console.log('   Length:', actualPublicKey.length, 'bytes');
 
-      const publicKeyHex = '0x' + Buffer.from(actualPublicKey).toString('hex');
+      publicKeyHex = '0x' + Buffer.from(actualPublicKey).toString('hex');
       console.log('🔑 Public key hex:', publicKeyHex);
       console.log('🔑 Public key length:', actualPublicKey.length, 'bytes');
 
-      // Derive address from public key based on curve
+      // Derive address from public key based on curve AND chain
       if (curve === Curve.SECP256K1) {
-        // For EVM chains, derive Ethereum address using the official ethers.js method
-        const { computeAddress, SigningKey } = await import('ethers');
-
         console.log('');
-        console.log('🎯 ETHEREUM ADDRESS DERIVATION (following console3.md logic)');
+        console.log(`🎯 ADDRESS DERIVATION FOR ${params.chain}`);
         console.log('═══════════════════════════════════════════════════════');
 
-        let uncompressedPubKey: string;
-
-        if (actualPublicKey.length === 33) {
-          // Compressed public key (33 bytes) - decompress using ethers.SigningKey
-          const compressedHex = '0x' + Buffer.from(actualPublicKey).toString('hex');
-          console.log('📝 Compressed public key (33 bytes):', compressedHex);
-
-          // Method from console3.md line 68:
-          // const uncompressedPubKey = ethers.SigningKey.computePublicKey(compressedPubKey, false);
-          uncompressedPubKey = SigningKey.computePublicKey(compressedHex, false);
-          console.log('✅ Decompressed to uncompressed (65 bytes):', uncompressedPubKey.substring(0, 20) + '...');
-        } else if (actualPublicKey.length === 64) {
-          // Uncompressed without 0x04 prefix - add it
-          console.log('📝 Public key is uncompressed without prefix (64 bytes)');
-          uncompressedPubKey = '0x04' + publicKeyHex.slice(2);
-        } else if (actualPublicKey.length === 65) {
-          // Already uncompressed with 0x04 prefix
-          console.log('📝 Public key is already uncompressed (65 bytes)');
-          uncompressedPubKey = publicKeyHex;
+        if (params.chain === 'Bitcoin') {
+          // For Bitcoin, use Bitcoin address derivation
+          const { deriveBitcoinAddress } = await import('../utils/deriveAddresses');
+          fromAddress = deriveBitcoinAddress(publicKeyHex);
+          console.log('✅ Derived Bitcoin address:', fromAddress);
         } else {
-          throw new Error(`Unexpected public key length: ${actualPublicKey.length} bytes`);
+          // For EVM chains, derive Ethereum address using the official ethers.js method
+          const { computeAddress, SigningKey } = await import('ethers');
+
+          let uncompressedPubKey: string;
+
+          if (actualPublicKey.length === 33) {
+            // Compressed public key (33 bytes) - decompress using ethers.SigningKey
+            const compressedHex = '0x' + Buffer.from(actualPublicKey).toString('hex');
+            console.log('📝 Compressed public key (33 bytes):', compressedHex);
+
+            // Method from console3.md line 68:
+            // const uncompressedPubKey = ethers.SigningKey.computePublicKey(compressedPubKey, false);
+            uncompressedPubKey = SigningKey.computePublicKey(compressedHex, false);
+            console.log('✅ Decompressed to uncompressed (65 bytes):', uncompressedPubKey.substring(0, 20) + '...');
+          } else if (actualPublicKey.length === 64) {
+            // Uncompressed without 0x04 prefix - add it
+            console.log('📝 Public key is uncompressed without prefix (64 bytes)');
+            uncompressedPubKey = '0x04' + publicKeyHex.slice(2);
+          } else if (actualPublicKey.length === 65) {
+            // Already uncompressed with 0x04 prefix
+            console.log('📝 Public key is already uncompressed (65 bytes)');
+            uncompressedPubKey = publicKeyHex;
+          } else {
+            throw new Error(`Unexpected public key length: ${actualPublicKey.length} bytes`);
+          }
+
+          // Derive address using ethers.computeAddress (does KECCAK256 + last 20 bytes automatically)
+          // This matches console3.md line 72:
+          // const address = ethers.computeAddress(uncompressedPubKey);
+          fromAddress = computeAddress(uncompressedPubKey);
+
+          console.log('✅ Derived Ethereum address:', fromAddress);
         }
 
-        // Derive address using ethers.computeAddress (does KECCAK256 + last 20 bytes automatically)
-        // This matches console3.md line 72:
-        // const address = ethers.computeAddress(uncompressedPubKey);
-        fromAddress = computeAddress(uncompressedPubKey);
-
-        console.log('✅ Derived Ethereum address:', fromAddress);
         console.log('═══════════════════════════════════════════════════════');
         console.log('');
       } else if (curve === Curve.ED25519) {
@@ -188,11 +197,19 @@ export async function signWithDWallet(
     ? SignatureAlgorithm.ECDSASecp256k1
     : SignatureAlgorithm.EdDSA;
 
-  // Hash scheme depends on the curve and blockchain
+  // Hash scheme depends on the blockchain
   // Ethereum (SECP256K1 ECDSA) requires KECCAK256
+  // Bitcoin (SECP256K1 ECDSA) requires DoubleSHA256
   // Solana (ED25519 EdDSA) uses SHA512
   // This must match the hash scheme used in discovery function
-  const hashScheme = curve === Curve.SECP256K1 ? Hash.KECCAK256 : Hash.SHA512;
+  let hashScheme: Hash;
+  if (params.chain === 'Bitcoin') {
+    hashScheme = Hash.DoubleSHA256;
+  } else if (curve === Curve.SECP256K1) {
+    hashScheme = Hash.KECCAK256; // Ethereum
+  } else {
+    hashScheme = Hash.SHA512; // Solana
+  }
 
   // === STEP 1: Create Presign Capability ===
   // Do this BEFORE building the transaction to minimize time between blockhash fetch and broadcast
@@ -810,7 +827,16 @@ export async function signWithDWallet(
   let serialized: string;
   let hash: string;
 
-  if (params.chain === 'Solana') {
+  if (params.chain === 'Bitcoin') {
+    // For Bitcoin, attach public key to unsignedTx for scriptSig construction
+    unsignedTx.publicKey = publicKeyHex;
+
+    // Use the chain signer's broadcast method
+    const signer = getChainSigner(params.chain);
+    const result = await signer.broadcastTransaction(unsignedTx, signature, 0);
+
+    return result;
+  } else if (params.chain === 'Solana') {
     // For Solana, attach EdDSA signature to transaction
     const transaction = unsignedTx.transaction as SolanaTransaction;
 
@@ -1024,7 +1050,39 @@ export async function broadcastTransaction(
 ): Promise<{ txHash: string }> {
   console.log(`📡 Broadcasting ${chain} transaction...`);
 
-  if (chain === 'Solana') {
+  if (chain === 'Bitcoin') {
+    // Broadcast Bitcoin transaction
+    console.log('📡 Broadcasting Bitcoin transaction to Blockstream API...');
+
+    // The serialized transaction should be hex-encoded
+    const txHex = serialized;
+
+    try {
+      const response = await fetch('https://blockstream.info/testnet/api/tx', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'text/plain',
+        },
+        body: txHex,
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Bitcoin broadcast failed: ${response.status} - ${errorText}`);
+      }
+
+      const txHash = await response.text(); // Blockstream returns just the txid
+
+      console.log('✅ Bitcoin transaction broadcasted!');
+      console.log('🔗 TX Hash:', txHash);
+      console.log('📋 Explorer:', `https://blockstream.info/testnet/tx/${txHash}`);
+
+      return { txHash };
+    } catch (error) {
+      console.error('❌ Bitcoin broadcast failed:', error);
+      throw error;
+    }
+  } else if (chain === 'Solana') {
     // Broadcast Solana transaction
     const connection = new Connection(clusterApiUrl('devnet'), 'confirmed');
 

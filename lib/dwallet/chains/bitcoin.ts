@@ -3,6 +3,7 @@
  */
 
 import { ChainSigner, UnsignedTransaction, SignedTransactionResult } from '../core/types';
+import { ethers } from 'ethers';
 
 /**
  * Bitcoin UTXO structure
@@ -45,7 +46,24 @@ export class BitcoinSigner implements ChainSigner {
     const utxos: UTXO[] = await utxosResponse.json();
     console.log(`📦 Found ${utxos.length} UTXOs`);
 
-    if (utxos.length === 0) {
+    // For each UTXO, we need to fetch its transaction to get the scriptPubKey
+    // This is required for proper signature generation
+    const utxosWithScriptPubKey = await Promise.all(
+      utxos.map(async (utxo) => {
+        const txResponse = await fetch(`${this.rpcUrl}/tx/${utxo.txid}`);
+        if (!txResponse.ok) {
+          throw new Error(`Failed to fetch transaction ${utxo.txid}`);
+        }
+        const txData = await txResponse.json();
+        const output = txData.vout[utxo.vout];
+        return {
+          ...utxo,
+          scriptPubKey: output.scriptpubkey,
+        };
+      })
+    );
+
+    if (utxosWithScriptPubKey.length === 0) {
       throw new Error('No UTXOs available. Address has no funds.');
     }
 
@@ -54,10 +72,10 @@ export class BitcoinSigner implements ChainSigner {
     const feeRate = 1; // 1 sat/vbyte for testnet
 
     // Select UTXOs (simple algorithm: use first UTXO that's large enough)
-    let selectedUtxos: UTXO[] = [];
+    let selectedUtxos: any[] = [];
     let totalInput = 0;
 
-    for (const utxo of utxos) {
+    for (const utxo of utxosWithScriptPubKey) {
       if (!utxo.status.confirmed) continue; // Skip unconfirmed
 
       selectedUtxos.push(utxo);
@@ -146,8 +164,60 @@ export class BitcoinSigner implements ChainSigner {
     console.log(`✅ Bitcoin transaction built: ${unsignedTx.length} bytes`);
     console.log(`📋 Raw transaction (hex): ${unsignedTx.toString('hex').substring(0, 40)}...`);
 
+    // === CRITICAL: Build signing transaction with scriptPubKey ===
+    // For Bitcoin P2PKH signing, we must replace the empty scriptSig with the scriptPubKey
+    // of the UTXO being spent, then append SIGHASH_ALL and double SHA256
+
+    console.log('🔐 Building signing transaction for Bitcoin sighash...');
+
+    // For simplicity, assume single input (can be extended for multiple inputs)
+    const utxo = selectedUtxos[0];
+    const scriptPubKeyHex = utxo.scriptPubKey;
+    const scriptPubKey = Buffer.from(scriptPubKeyHex, 'hex');
+
+    console.log(`📋 ScriptPubKey from UTXO: ${scriptPubKeyHex}`);
+    console.log(`📋 ScriptPubKey length: ${scriptPubKey.length} bytes`);
+
+    // Build signing transaction: replace empty scriptSig with scriptPubKey
+    const voutBuffer = Buffer.alloc(4);
+    voutBuffer.writeUInt32LE(utxo.vout, 0);
+
+    const signingInput = Buffer.concat([
+      Buffer.from(utxo.txid, 'hex').reverse(),  // Previous tx hash (reversed)
+      voutBuffer,                                 // Previous output index (little endian)
+      Buffer.from([scriptPubKey.length]),        // Script length
+      scriptPubKey,                               // ScriptPubKey (NOT empty!)
+      Buffer.from([0xfe, 0xff, 0xff, 0xff]),    // Sequence
+    ]);
+
+    const signingTx = Buffer.concat([
+      version,
+      inputCount,
+      signingInput,
+      outputCount,
+      outputs,
+      locktime,
+      Buffer.from([0x01, 0x00, 0x00, 0x00]),  // SIGHASH_ALL (4 bytes, little endian)
+    ]);
+
+    console.log(`📋 Signing transaction: ${signingTx.length} bytes`);
+    console.log(`📋 Signing tx hex (first 100 chars): ${signingTx.toString('hex').substring(0, 100)}...`);
+
+    // CRITICAL: Pass RAW signing transaction to dWallet, NOT the hash!
+    // dWallet will hash it internally with DoubleSHA256 based on hashScheme parameter
+    const messageBytes = new Uint8Array(signingTx);
+
+    // For logging: Calculate what the sighash SHOULD be after dWallet hashes it
+    const crypto = require('crypto');
+    const hash1 = crypto.createHash('sha256').update(signingTx).digest();
+    const expectedSighash = crypto.createHash('sha256').update(hash1).digest();
+
+    console.log(`✅ Passing RAW signing transaction to dWallet: ${signingTx.length} bytes`);
+    console.log(`📋 Expected sighash after DoubleSHA256: ${expectedSighash.toString('hex')}`);
+    console.log(`📋 dWallet will apply DoubleSHA256 hashing internally`);
+
     return {
-      messageBytes: new Uint8Array(unsignedTx),
+      messageBytes,  // Pass raw signing transaction, dWallet will hash it!
       unsignedTx: {
         rawTx: unsignedTx,
         selectedUtxos,
@@ -171,8 +241,12 @@ export class BitcoinSigner implements ChainSigner {
     const pubKeyHash = decoded.slice(1, -4);
 
     // Value (8 bytes, little endian)
+    // Browser-compatible way to write 64-bit integer
     const valueBuffer = Buffer.alloc(8);
-    valueBuffer.writeBigUInt64LE(BigInt(value), 0);
+    const valueBigInt = BigInt(value);
+    for (let i = 0; i < 8; i++) {
+      valueBuffer[i] = Number((valueBigInt >> BigInt(i * 8)) & BigInt(0xff));
+    }
 
     // P2PKH script: OP_DUP OP_HASH160 <pubKeyHash> OP_EQUALVERIFY OP_CHECKSIG
     const script = Buffer.concat([
@@ -212,41 +286,86 @@ export class BitcoinSigner implements ChainSigner {
 
   /**
    * Broadcast signed Bitcoin transaction
+   * Constructs the final signed transaction with scriptSig
    */
   async broadcastTransaction(
     unsignedTx: any,
     signature: Uint8Array,
     recoveryId: number
   ): Promise<SignedTransactionResult> {
-    console.log('📡 Broadcasting Bitcoin transaction...');
+    console.log('📝 Finalizing Bitcoin transaction with signature...');
 
-    // For Bitcoin, we need to insert the signature into each input's scriptSig
-    // This is complex because we need to:
-    // 1. Create DER-encoded signature
-    // 2. Add SIGHASH_ALL flag (0x01)
-    // 3. Add public key
-    // 4. Create scriptSig for each input
+    const { rawTx, selectedUtxos, publicKey } = unsignedTx;
+
+    if (!publicKey) {
+      throw new Error('Public key is required for Bitcoin signing');
+    }
+
+    console.log('🔑 Using public key:', publicKey.substring(0, 40) + '...');
 
     // Extract r and s from signature (64 bytes: 32 for r, 32 for s)
     const r = signature.slice(0, 32);
     const s = signature.slice(32, 64);
 
-    // Create DER-encoded signature
+    // Create DER-encoded signature with SIGHASH_ALL
     const derSig = this.createDERSignature(r, s);
+    console.log('📋 DER signature:', Buffer.from(derSig).toString('hex'));
 
-    console.log('🔍 DER signature:', Buffer.from(derSig).toString('hex'));
+    // Create scriptSig for P2PKH: <signature> <pubkey>
+    const pubKeyBytes = Buffer.from(publicKey.startsWith('0x') ? publicKey.slice(2) : publicKey, 'hex');
+    const scriptSig = Buffer.concat([
+      Buffer.from([derSig.length]),  // Push DER signature length
+      Buffer.from(derSig),
+      Buffer.from([pubKeyBytes.length]),  // Push pubkey length
+      pubKeyBytes,
+    ]);
 
-    // For now, throw an error indicating this needs full implementation
-    throw new Error(
-      'Bitcoin transaction signing is partially implemented. ' +
-      'Full implementation requires:\n' +
-      '1. Public key extraction from dWallet\n' +
-      '2. DER signature encoding with SIGHASH_ALL\n' +
-      '3. ScriptSig construction for each input\n' +
-      '4. Transaction serialization with signatures\n' +
-      '5. Broadcast via Blockstream API\n\n' +
-      'This will be completed in the next iteration.'
-    );
+    console.log('📋 ScriptSig length:', scriptSig.length);
+    console.log('📋 ScriptSig hex:', scriptSig.toString('hex'));
+
+    // Now rebuild the transaction with scriptSig
+    // Parse the unsigned transaction to insert scriptSig
+    const unsignedBuffer = Buffer.from(rawTx);
+
+    console.log('📋 Unsigned tx hex:', unsignedBuffer.toString('hex'));
+    console.log('📋 Unsigned tx length:', unsignedBuffer.length);
+
+    // Find where to insert scriptSig (after the outpoint in first input)
+    // Version (4 bytes) + input count (1 byte) + txid (32 bytes) + vout (4 bytes) = 41 bytes
+    const prefix = unsignedBuffer.slice(0, 41);
+
+    console.log('📋 Prefix (41 bytes):', prefix.toString('hex'));
+    console.log('📋 Empty scriptSig length byte at position 41:', unsignedBuffer[41]);
+
+    // Skip only the empty scriptSig length (1 byte with value 0)
+    // The suffix includes sequence + outputs + locktime
+    const suffixStart = 41 + 1;
+    const suffix = unsignedBuffer.slice(suffixStart);
+
+    console.log('📋 Suffix starts at byte', suffixStart, ':', suffix.toString('hex').substring(0, 40) + '...');
+
+    // Construct final signed transaction
+    // Structure: [prefix][scriptSig_length][scriptSig][suffix (contains sequence+outputs+locktime)]
+    const signedTx = Buffer.concat([
+      prefix,
+      Buffer.from([scriptSig.length]),  // New script length
+      scriptSig,
+      suffix,  // Contains sequence (0xfeffffff) + outputs + locktime
+    ]);
+
+    const txHex = signedTx.toString('hex');
+    const txHash = Buffer.from(ethers.keccak256('0x' + txHex).slice(2), 'hex').reverse().toString('hex');
+
+    console.log('✅ Bitcoin transaction finalized!');
+    console.log('📋 Signed transaction length:', signedTx.length, 'bytes');
+    console.log('📋 Complete TX hex:', txHex);
+
+    return {
+      signature: Buffer.from(signature).toString('hex'),
+      hash: txHash,
+      txHash: txHash,
+      serialized: txHex,
+    };
   }
 
   /**
