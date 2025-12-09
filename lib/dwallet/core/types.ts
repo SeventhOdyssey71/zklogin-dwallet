@@ -57,7 +57,8 @@ export interface ChainSigner {
   buildUnsignedTransaction(
     recipient: string,
     amount: string,
-    fromAddress: string
+    fromAddress: string,
+    publicKey?: string
   ): Promise<UnsignedTransaction>;
 
   /**

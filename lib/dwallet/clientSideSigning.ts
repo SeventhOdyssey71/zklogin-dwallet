@@ -42,15 +42,16 @@ export async function buildUnsignedTransaction(
   chain: string,
   recipient: string,
   amount: string,
-  fromAddress: string
+  fromAddress: string,
+  publicKey?: string
 ): Promise<UnsignedTransaction> {
   console.log(`📝 Building unsigned ${chain} transaction...`);
 
   // Get chain-specific signer
   const signer = getChainSigner(chain);
 
-  // Delegate to chain signer
-  return await signer.buildUnsignedTransaction(recipient, amount, fromAddress);
+  // Delegate to chain signer (pass public key for chains that need it)
+  return await signer.buildUnsignedTransaction(recipient, amount, fromAddress, publicKey);
 }
 
 /**
@@ -509,7 +510,8 @@ export async function signWithDWallet(
     params.chain,
     params.recipient,
     params.amount,
-    fromAddress
+    fromAddress,
+    publicKeyHex // Pass public key for chains that need it (like Cardano)
   );
 
   // Track when blockhash was fetched for Solana
@@ -894,6 +896,14 @@ export async function signWithDWallet(
   } else if (params.chain === 'Polkadot') {
     // For Polkadot, use the chain signer's broadcast method
     console.log('🔐 Processing ED25519 signature for Polkadot transaction...');
+
+    const signer = getChainSigner(params.chain);
+    const result = await signer.broadcastTransaction(unsignedTx, signature);
+
+    return result;
+  } else if (params.chain === 'Cardano') {
+    // For Cardano, use the chain signer's broadcast method
+    console.log('🔐 Processing ED25519 signature for Cardano transaction...');
 
     const signer = getChainSigner(params.chain);
     const result = await signer.broadcastTransaction(unsignedTx, signature);

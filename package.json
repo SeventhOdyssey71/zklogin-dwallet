@@ -9,6 +9,8 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@emurgo/cardano-message-signing-browser": "^1.1.0",
+    "@emurgo/cardano-serialization-lib-browser": "^15.0.3",
     "@ika.xyz/ika-wasm": "^0.2.1",
     "@ika.xyz/sdk": "^0.2.3",
     "@mysten/dapp-kit": "^0.19.11",
