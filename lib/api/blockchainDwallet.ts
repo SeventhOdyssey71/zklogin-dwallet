@@ -21,20 +21,40 @@ export async function getDWalletsFromBlockchain(ownerAddress: string) {
 
     await ikaClient.initialize();
 
-    // Get all objects owned by the address
-    const ownedObjects = await suiClient.getOwnedObjects({
-      owner: ownerAddress,
-      options: {
-        showType: true,
-        showContent: true,
-        showOwner: true,
-      },
-    });
+    // Fetch ALL objects with pagination
+    let allObjects: any[] = [];
+    let hasNextPage = true;
+    let cursor: string | null | undefined = null;
 
-    console.log('📦 Total owned objects:', ownedObjects.data.length);
+    console.log('📦 Fetching all owned objects with pagination...');
+
+    while (hasNextPage) {
+      const response = await suiClient.getOwnedObjects({
+        owner: ownerAddress,
+        options: {
+          showType: true,
+          showContent: true,
+          showOwner: true,
+        },
+        limit: 50, // Fetch 50 objects per page
+        cursor: cursor,
+      });
+
+      allObjects = allObjects.concat(response.data);
+      hasNextPage = response.hasNextPage;
+      cursor = response.nextCursor;
+
+      console.log(`📄 Fetched page: ${response.data.length} objects (total so far: ${allObjects.length})`);
+
+      if (hasNextPage && cursor) {
+        console.log(`➡️ Fetching next page with cursor: ${cursor}`);
+      }
+    }
+
+    console.log('📦 Total owned objects (all pages):', allObjects.length);
 
     // Filter for DWalletCap objects
-    const dWalletCaps = ownedObjects.data.filter((obj) => {
+    const dWalletCaps = allObjects.filter((obj) => {
       const type = obj.data?.type;
       return type && type.includes('DWalletCap');
     });
