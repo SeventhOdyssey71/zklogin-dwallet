@@ -909,6 +909,14 @@ export async function signWithDWallet(
     const result = await signer.broadcastTransaction(unsignedTx, signature);
 
     return result;
+  } else if (params.chain === 'NEAR') {
+    // For NEAR, use the chain signer's broadcast method
+    console.log('🔐 Processing ED25519 signature for NEAR transaction...');
+
+    const signer = getChainSigner(params.chain);
+    const result = await signer.broadcastTransaction(unsignedTx, signature);
+
+    return result;
   } else {
     // For EVM chains, attach ECDSA signature to transaction
     // ECDSA signatures need the correct recovery value (yParity) to derive the correct address

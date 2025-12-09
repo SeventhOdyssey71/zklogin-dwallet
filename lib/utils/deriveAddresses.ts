@@ -149,7 +149,9 @@ export function deriveSolanaAddress(publicKey: string): string {
     console.log('   Public key bytes length:', bytes.length);
 
     // Solana address is just the base58-encoded public key (32 bytes for ED25519)
-    const address = bs58.encode(bytes);
+    // bs58 might be a default export or have .default property
+    const encode = bs58.encode || bs58.default?.encode || bs58.default;
+    const address = typeof encode === 'function' ? encode(bytes) : bs58(bytes);
     console.log('   ✅ Solana address:', address);
     return address;
   } catch (error) {
@@ -194,7 +196,9 @@ export function derivePolkadotAddress(publicKey: string): string {
     const address = Buffer.concat([payload, checksum]);
 
     // Base58 encode
-    return bs58.encode(address);
+    // bs58 might be a default export or have .default property
+    const encode = bs58.encode || bs58.default?.encode || bs58.default;
+    return typeof encode === 'function' ? encode(address) : bs58(address);
   } catch (error) {
     console.error('Error deriving Polkadot address:', error);
     return 'Invalid public key';
@@ -258,14 +262,17 @@ export function deriveCardanoAddress(publicKey: string): string {
 
 /**
  * Derive NEAR account ID from ED25519 public key
- * NEAR implicit accounts use the raw hex public key (64 chars, no .near suffix)
+ * NEAR implicit accounts use the lowercase hex public key (64 chars, no .near suffix)
+ *
+ * Format: 32-byte ED25519 public key → 64 lowercase hex characters
+ * Example: 98793cd91a3f870fb126f66285808c7e094afcfc4eda8a970f6648cdf0dbd6de
  */
 export function deriveNearAddress(publicKey: string): string {
   try {
-    // NEAR implicit account is just the hex-encoded public key (64 characters)
+    // NEAR implicit account is the lowercase hex-encoded public key (64 characters)
     // Named accounts have .near/.testnet suffix, but implicit accounts don't
     const hex = publicKey.startsWith('0x') ? publicKey.slice(2) : publicKey;
-    return hex;  // Return just the hex, no .near suffix
+    return hex.toLowerCase();  // NEAR requires lowercase hex
   } catch (error) {
     console.error('Error deriving NEAR address:', error);
     return 'Invalid public key';

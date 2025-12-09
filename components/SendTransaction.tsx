@@ -58,7 +58,10 @@ export function SendTransaction({
       case 'Cardano':
         return /^addr_test1[a-z0-9]{53,}$/.test(addr);
       case 'NEAR':
-        return /^[a-z0-9]{64}\.near$/.test(addr);
+        // NEAR supports both implicit accounts (64 hex chars) and named accounts (.near/.testnet)
+        const isImplicitAccount = /^[0-9a-f]{64}$/.test(addr);
+        const isNamedAccount = /^[a-z0-9_-]+\.(near|testnet)$/.test(addr);
+        return isImplicitAccount || isNamedAccount;
       default:
         return false;
     }

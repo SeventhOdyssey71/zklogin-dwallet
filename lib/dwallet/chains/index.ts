@@ -8,6 +8,7 @@ import { getSolanaSigner } from './solana';
 import { getBitcoinSigner } from './bitcoin';
 import { getPolkadotSigner } from './polkadot';
 import { getCardanoSigner } from './cardano';
+import { getNearSigner } from './near';
 
 /**
  * Get a chain signer for the specified blockchain
@@ -37,9 +38,9 @@ export function getChainSigner(chain: string): ChainSigner {
     case 'Cardano':
       return getCardanoSigner();
 
-    // EdDSA chains (future)
+    // NEAR
     case 'NEAR':
-      throw new Error('NEAR signing not yet implemented');
+      return getNearSigner();
 
     default:
       throw new Error(`Unsupported chain: ${chain}`);
@@ -59,6 +60,7 @@ export function isChainSupported(chain: string): boolean {
     'Bitcoin',
     'Polkadot',
     'Cardano',
+    'NEAR',
   ];
   return supportedChains.includes(chain);
 }
@@ -76,5 +78,6 @@ export function getSupportedChains(): string[] {
     'Bitcoin',
     'Polkadot',
     'Cardano',
+    'NEAR',
   ];
 }
