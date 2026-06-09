@@ -17,6 +17,10 @@ const IKA_COIN_TYPE = `${IKA_PACKAGE_ID}::ika::IKA`;
 const SUI_LOGO = 'https://cryptologos.cc/logos/sui-sui-logo.png';
 const IKA_LOGO = 'https://coin-images.coingecko.com/coins/images/67598/large/ika.jpg?1753770879';
 
+// Testnet faucets — fund the signed-in zkLogin address with SUI (gas) and IKA (MPC fees).
+const SUI_FAUCET = 'https://faucet.sui.io/?network=testnet';
+const IKA_FAUCET = 'https://faucet.ika.xyz/';
+
 function fmt(raw: string, decimals: number): string {
   const n = Number(raw) / 10 ** decimals;
   return n.toLocaleString(undefined, { maximumFractionDigits: 4 });
@@ -52,17 +56,28 @@ export function GasBalances({ address }: { address: string }) {
   }, [load]);
 
   return (
-    <div className="flex items-center justify-center gap-2 px-5 sm:px-6 pb-3 max-w-5xl mx-auto w-full">
-      <TokenPill logo={SUI_LOGO} symbol="SUI" amount={sui} loading={loading} />
-      <TokenPill logo={IKA_LOGO} symbol="IKA" amount={ika} loading={loading} />
-      <button
-        onClick={load}
-        disabled={loading}
-        className="ml-1 mono-label hover:text-[var(--foreground)] transition disabled:opacity-50"
-        title="Refresh balances"
-      >
-        {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : '↻'}
-      </button>
+    <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-2 px-5 sm:px-6 pb-3 max-w-5xl mx-auto w-full">
+      <div className="flex items-center gap-2">
+        <TokenPill logo={SUI_LOGO} symbol="SUI" amount={sui} loading={loading} faucet={SUI_FAUCET} />
+        <TokenPill logo={IKA_LOGO} symbol="IKA" amount={ika} loading={loading} faucet={IKA_FAUCET} />
+        <button
+          onClick={load}
+          disabled={loading}
+          className="ml-1 mono-label hover:text-[var(--foreground)] transition disabled:opacity-50"
+          title="Refresh balances"
+        >
+          {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : '↻'}
+        </button>
+      </div>
+      <div className="mono-label flex items-center gap-2">
+        <span>testnet faucet:</span>
+        <a href={SUI_FAUCET} target="_blank" rel="noopener noreferrer" className="underline hover:text-[var(--foreground)]">
+          SUI ↗
+        </a>
+        <a href={IKA_FAUCET} target="_blank" rel="noopener noreferrer" className="underline hover:text-[var(--foreground)]">
+          IKA ↗
+        </a>
+      </div>
     </div>
   );
 }
@@ -72,11 +87,13 @@ function TokenPill({
   symbol,
   amount,
   loading,
+  faucet,
 }: {
   logo: string;
   symbol: string;
   amount: string | null;
   loading: boolean;
+  faucet: string;
 }) {
   return (
     <div className="flex items-center gap-2 px-3 py-1.5 rounded-full border border-[var(--border)] bg-[var(--surface)]">
@@ -85,6 +102,15 @@ function TokenPill({
       <span className="text-sm tabular-nums">
         {amount ?? (loading ? '…' : '0')} <span className="text-[var(--muted)]">{symbol}</span>
       </span>
+      <a
+        href={faucet}
+        target="_blank"
+        rel="noopener noreferrer"
+        title={`Get testnet ${symbol}`}
+        className="text-[var(--muted)] hover:text-[var(--foreground)] text-xs"
+      >
+        ＋
+      </a>
     </div>
   );
 }
