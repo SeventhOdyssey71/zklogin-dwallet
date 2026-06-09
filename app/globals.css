@@ -1,74 +1,101 @@
 @import "tailwindcss";
 
+/*
+ * dWallet design system — clean, monospace-forward, dark-first.
+ * Typography is JetBrains Mono throughout for a precise, technical feel.
+ */
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  /* Strictly black & white / grayscale */
+  --background: #000000;
+  --surface: #0b0b0b;
+  --surface-2: #161616;
+  --border: #2a2a2a;
+  --foreground: #ffffff;
+  --muted: #9a9a9a;
+  --accent: #ffffff;
+  --accent-2: #ffffff;
+  --danger: #ffffff;
+  --radius: 14px;
 }
 
 @theme inline {
   --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-border: var(--border);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-2: var(--accent-2);
+  --color-danger: var(--danger);
+  --font-mono: var(--font-jetbrains-mono);
+  --font-sans: var(--font-jetbrains-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  padding: 0;
+  margin: 0;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: var(--font-geist-sans), system-ui, sans-serif;
+  font-family: var(--font-jetbrains-mono), ui-monospace, "SF Mono", Menlo, monospace;
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "ss01", "cv01", "cv02";
+  letter-spacing: -0.5px;
 }
 
-/* Normal cursor everywhere */
-* {
-  cursor: auto !important;
+/* Subtle dotted grid backdrop */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background-image: radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.035) 1px, transparent 0);
+  background-size: 22px 22px;
+  pointer-events: none;
+  z-index: 0;
 }
 
-/* Custom selection colors */
 ::selection {
-  background-color: #000;
-  color: #fff;
+  background: rgba(255, 255, 255, 0.2);
 }
 
-:root.dark ::selection {
-  background-color: #fff;
-  color: #000;
+/* Thin, quiet scrollbars */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 999px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
 }
 
-/* Smooth scrolling */
-html {
-  scroll-behavior: smooth;
+/* Reusable bits */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
 }
 
-/* Reduced motion support */
-@media (prefers-reduced-motion: reduce) {
-  * {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
-  }
-
-  html {
-    scroll-behavior: auto;
-  }
+.mono-label {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
 }
 
-/* Ensure @mysten/dapp-kit wallet modal appears on top */
-[data-dapp-kit-modal],
-[data-dapp-kit-modal] ~ div,
-.dapp-kit-modal,
-.sui-wallet-modal {
-  z-index: 99999 !important;
-}
-
-/* Wallet modal overlay */
-[data-dapp-kit-modal-overlay],
-.dapp-kit-modal-overlay {
-  z-index: 99998 !important;
+@keyframes pulse-ring {
+  0% { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.3); }
+  70% { box-shadow: 0 0 0 10px rgba(255, 255, 255, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0); }
 }

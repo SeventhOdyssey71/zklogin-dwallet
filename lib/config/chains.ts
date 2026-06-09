@@ -73,9 +73,9 @@ export const TESTNET_CHAINS: { [key: string]: ChainConfig } = {
 };
 
 export const SOLANA_TESTNET = {
-  name: 'Solana Devnet',
-  rpcUrl: 'https://api.devnet.solana.com',
-  blockExplorer: 'https://explorer.solana.com/?cluster=devnet',
+  name: 'Solana Testnet',
+  rpcUrl: 'https://api.testnet.solana.com',
+  blockExplorer: 'https://explorer.solana.com/?cluster=testnet',
 };
 
 export const POLKADOT_TESTNET = {

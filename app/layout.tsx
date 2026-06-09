@@ -1,44 +1,42 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 import { Providers } from "./providers";
-import { Navigation } from "@/components/layout/Navigation";
 import { Toaster } from "sonner";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
+const jetbrainsMono = JetBrains_Mono({
+  variable: "--font-jetbrains-mono",
   subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
+  weight: ["400", "500", "600", "700", "800"],
 });
 
 export const metadata: Metadata = {
-  title: "dWallet - Multi-Chain Wallet Control",
-  description: "Create and manage dWallets across multiple blockchains with zero-trust MPC technology",
-  keywords: ['dWallet', 'blockchain', 'multi-chain', 'MPC', 'crypto wallet'],
-  openGraph: {
-    title: 'dWallet - Multi-Chain Wallet Control',
-    description: 'Create and manage dWallets across multiple blockchains with zero-trust MPC technology',
-  },
+  title: "dWallet — zkLogin multi-chain wallets on Sui",
+  description:
+    "Sign in with Google (zkLogin) and create multi-chain dWallets secured by Ika 2PC-MPC. Built for linq.",
 };
 
 export default function RootLayout({
   children,
-}: Readonly<{
-  children: React.ReactNode;
-}>) {
+}: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
-      >
+      <body className={`${jetbrainsMono.variable} antialiased`}>
         <Providers>
-          <Navigation />
           {children}
-          <Toaster position="bottom-right" richColors />
+          <Toaster
+            position="bottom-right"
+            theme="dark"
+            toastOptions={{
+              style: {
+                background: "var(--surface-2)",
+                border: "1px solid var(--border)",
+                color: "var(--foreground)",
+                fontFamily: "var(--font-jetbrains-mono)",
+                fontSize: "13px",
+              },
+            }}
+          />
         </Providers>
       </body>
     </html>

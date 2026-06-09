@@ -19,8 +19,8 @@ export class SolanaSigner implements ChainSigner {
   private connection: Connection;
 
   constructor() {
-    // Connect to Solana devnet
-    this.connection = new Connection(clusterApiUrl('devnet'), 'confirmed');
+    // Connect to Solana testnet
+    this.connection = new Connection(clusterApiUrl('testnet'), 'confirmed');
   }
 
   /**
@@ -52,7 +52,7 @@ export class SolanaSigner implements ChainSigner {
     // Warn if insufficient balance
     if (balance < lamports) {
       console.warn(`⚠️ WARNING: Insufficient balance! Have ${balanceSOL} SOL, need ${amount} SOL`);
-      console.warn(`📋 Request devnet SOL from: https://faucet.solana.com/`);
+      console.warn(`📋 Request testnet SOL from: https://faucet.solana.com/`);
     }
 
     // Get recent blockhash - fetch as late as possible!

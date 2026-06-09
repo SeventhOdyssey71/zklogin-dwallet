@@ -1131,7 +1131,7 @@ export async function broadcastTransaction(
     }
   } else if (chain === 'Solana') {
     // Broadcast Solana transaction
-    const connection = new Connection(clusterApiUrl('devnet'), 'confirmed');
+    const connection = new Connection(clusterApiUrl('testnet'), 'confirmed');
 
     console.log('📡 Broadcasting Solana transaction...');
 
@@ -1170,7 +1170,7 @@ export async function broadcastTransaction(
     const signature = txSignature;
 
     console.log('✅ Transaction broadcasted:', signature);
-    console.log('📋 Solana Explorer:', `https://explorer.solana.com/tx/${signature}?cluster=devnet`);
+    console.log('📋 Solana Explorer:', `https://explorer.solana.com/tx/${signature}?cluster=testnet`);
 
     // Wait for confirmation (with extended timeout)
     console.log('⏳ Waiting for confirmation (may take up to 60 seconds)...');
@@ -1185,7 +1185,7 @@ export async function broadcastTransaction(
         throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
       }
 
-      console.log('✅ Transaction confirmed on Solana devnet!');
+      console.log('✅ Transaction confirmed on Solana testnet!');
       console.log('   Signature:', signature);
     } catch (error: any) {
       // If confirmation times out, still return the signature
@@ -1193,7 +1193,7 @@ export async function broadcastTransaction(
       if (error.message && (error.message.includes('timeout') || error.message.includes('Timeout') || error.name === 'TransactionExpiredTimeoutError')) {
         console.warn('⚠️ Confirmation timeout - transaction was sent but confirmation timed out');
         console.warn('📋 The transaction may still succeed. Check Solana Explorer:');
-        console.warn(`   https://explorer.solana.com/tx/${signature}?cluster=devnet`);
+        console.warn(`   https://explorer.solana.com/tx/${signature}?cluster=testnet`);
         // Don't throw - return the signature anyway since the transaction was broadcasted
       } else {
         throw error;

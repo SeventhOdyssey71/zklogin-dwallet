@@ -3,6 +3,7 @@
  */
 
 import { TESTNET_CHAINS, SOLANA_TESTNET, POLKADOT_TESTNET, CARDANO_TESTNET, NEAR_TESTNET } from '../config/chains';
+import { fetchTokenPrices } from './prices';
 
 /**
  * Convert hex string to decimal number (for wei to ETH conversion)
@@ -59,7 +60,7 @@ export async function fetchEVMBalance(chain: string, address: string): Promise<{
 
       // Use direct fetch with JSON-RPC to avoid ethers.js CORS issues
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10000);
+      const timeoutId = setTimeout(() => controller.abort(), 6000);
 
       const response = await fetch(rpcUrl, {
         method: 'POST',
@@ -128,7 +129,7 @@ export async function fetchSolanaBalance(address: string): Promise<{ balance: st
   try {
     // Add timeout to fetch request
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+    const timeoutId = setTimeout(() => controller.abort(), 6000); // 10 second timeout
 
     const response = await fetch(SOLANA_TESTNET.rpcUrl, {
       method: 'POST',
@@ -236,7 +237,7 @@ export async function fetchPolkadotBalance(address: string): Promise<{ balance: 
     // Set connection timeout
     const connectionTimeout = setTimeout(() => {
       provider.disconnect();
-    }, 10000); // 10 second timeout
+    }, 6000); // 10 second timeout
 
     // Connect to the node
     await provider.connect();
@@ -289,7 +290,7 @@ export async function fetchCardanoBalance(address: string): Promise<{ balance: s
   try {
     // Add timeout to fetch request
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+    const timeoutId = setTimeout(() => controller.abort(), 6000); // 10 second timeout
 
     // Use our API route to avoid CORS issues
     const response = await fetch(`/api/cardano-balance?address=${address}`, {
@@ -355,7 +356,7 @@ export async function fetchNearBalance(address: string): Promise<{ balance: stri
   try {
     // Add timeout to fetch request
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    const timeoutId = setTimeout(() => controller.abort(), 6000);
 
     const response = await fetch(NEAR_TESTNET.rpcUrl, {
       method: 'POST',
@@ -403,7 +404,12 @@ export async function fetchNearBalance(address: string): Promise<{ balance: stri
       usdValue: 0,
     };
   } catch (error) {
-    console.error('❌ NEAR balance fetch failed:', error instanceof Error ? error.message : 'Unknown error');
+    // A timeout/abort (slow or unfunded NEAR account) is benign — treat as 0, don't shout.
+    if (error instanceof Error && error.name === 'AbortError') {
+      console.warn('⏱️ NEAR balance fetch timed out — showing 0');
+    } else {
+      console.error('❌ NEAR balance fetch failed:', error instanceof Error ? error.message : 'Unknown error');
+    }
     return {
       balance: '0',
       usdValue: 0,
@@ -419,6 +425,9 @@ export async function fetchAllBalances(
   curve: number
 ): Promise<{ [chain: string]: { balance: string; usdValue: number } }> {
   const balances: { [chain: string]: { balance: string; usdValue: number } } = {};
+
+  // Fetch live USD prices in parallel with balances (one call, keyed by chain).
+  const pricesPromise = fetchTokenPrices();
 
   const promises = Object.entries(chainAddresses).map(async ([chain, address]) => {
     try {
@@ -451,6 +460,14 @@ export async function fetchAllBalances(
 
   await Promise.all(promises);
 
-  console.log('✅ All balances fetched');
+  // Apply live prices: usdValue = balance * priceUsd.
+  const prices = await pricesPromise;
+  for (const [chain, entry] of Object.entries(balances)) {
+    const price = prices[chain] ?? 0;
+    const amount = parseFloat(entry.balance) || 0;
+    entry.usdValue = amount * price;
+  }
+
+  console.log('✅ All balances + USD values fetched');
   return balances;
 }
