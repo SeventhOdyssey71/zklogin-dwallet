@@ -9,10 +9,10 @@
  */
 
 import { ChainSigner, UnsignedTransaction, SignedTransactionResult } from '../core/types';
-import { NEAR_TESTNET } from '../../config/chains';
+import { NEAR_MAINNET } from '../../config/chains';
 
 /**
- * NEAR chain signer for testnet
+ * NEAR chain signer for mainnet
  */
 export class NearSigner implements ChainSigner {
   /**
@@ -48,7 +48,7 @@ export class NearSigner implements ChainSigner {
       // Get access key info (includes nonce and block hash)
       console.log('🔍 Fetching access key info...');
       const provider = new (await import('near-api-js')).providers.JsonRpcProvider({
-        url: NEAR_TESTNET.rpcUrl,
+        url: NEAR_MAINNET.rpcUrl,
       });
 
       // Parse public key - convert hex to base58
@@ -80,7 +80,7 @@ export class NearSigner implements ChainSigner {
           throw new Error(
             `NEAR account ${fromAddress.slice(0, 16)}... does not exist yet. ` +
             `Implicit accounts must receive NEAR tokens before they can send transactions. ` +
-            `Please fund this account first from the NEAR testnet faucet.`
+            `This is NEAR mainnet — fund this account with real NEAR.`
           );
         }
         throw error;
@@ -141,7 +141,7 @@ export class NearSigner implements ChainSigner {
     unsignedTx: any,
     signature: Uint8Array
   ): Promise<SignedTransactionResult> {
-    console.log('📡 Broadcasting transaction to NEAR testnet...');
+    console.log('📡 Broadcasting transaction to NEAR mainnet...');
 
     try {
       const { transaction, publicKey, utils, transactions } = unsignedTx;
@@ -172,7 +172,7 @@ export class NearSigner implements ChainSigner {
       // Submit to NEAR RPC
       console.log('📡 Submitting transaction to NEAR network...');
       const provider = new (await import('near-api-js')).providers.JsonRpcProvider({
-        url: NEAR_TESTNET.rpcUrl,
+        url: NEAR_MAINNET.rpcUrl,
       });
 
       const result = await provider.sendJsonRpc('broadcast_tx_commit', [signedTxBase64]) as any;

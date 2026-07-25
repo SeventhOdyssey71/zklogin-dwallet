@@ -2,8 +2,8 @@
  * Shared types for dWallet client-side signing
  */
 
-import { SuiClient } from '@mysten/sui/client';
-import { IkaClient, UserShareEncryptionKeys, Curve } from '@ika.xyz/sdk';
+import { IkaClient, UserShareEncryptionKeys } from '@ika.xyz/sdk';
+import type { AppSuiClient } from '@/lib/sui/client';
 
 /**
  * Parameters for signing a transaction with dWallet
@@ -16,7 +16,7 @@ export interface SignTransactionParams {
   recipient: string;
   amount: string;
   memo?: string;
-  suiClient: SuiClient;
+  suiClient: AppSuiClient;
   userAccount: any; // Sui wallet account from @mysten/dapp-kit
   signAndExecuteTransaction: (params: any) => Promise<any>;
 }

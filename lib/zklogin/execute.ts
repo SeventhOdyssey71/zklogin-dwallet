@@ -15,8 +15,8 @@
  * The ephemeral private key never leaves the browser; the server only sees the public key + sig.
  */
 
-import { SuiClient } from '@mysten/sui/client';
 import { Transaction } from '@mysten/sui/transactions';
+import type { AppSuiClient } from '@/lib/sui/client';
 import { toBase64 } from '@mysten/sui/utils';
 import { signTxBytes, type EphemeralSession } from '@/lib/zklogin/zklogin';
 
@@ -32,14 +32,28 @@ export function loadEphemeral(): EphemeralSession | null {
 }
 
 /**
- * dapp-kit-compatible signer: pass `{ transaction }`, get `{ digest }`.
+ * The shape `/api/zklogin/execute` returns.
+ *
+ * `effects`, `events` and `objectChanges` come straight from execution, so callers can read a
+ * transaction's outcome without a follow-up `waitForTransaction` — which had to wait for the fullnode
+ * to index the transaction first, roughly a second per transaction on the send path.
+ */
+export interface ZkLoginExecuteResult {
+  digest: string;
+  effects?: unknown;
+  events?: unknown;
+  objectChanges?: unknown;
+}
+
+/**
+ * dapp-kit-compatible signer: pass `{ transaction }`, get `{ digest, effects, events, objectChanges }`.
  * Drop-in for the `signAndExecuteTransaction` callback the Ika flow expects.
  */
 export async function zkLoginSignAndExecute(
-  suiClient: SuiClient,
+  suiClient: AppSuiClient,
   zkAddress: string,
   params: { transaction: Transaction }
-): Promise<{ digest: string }> {
+): Promise<ZkLoginExecuteResult> {
   const eph = loadEphemeral();
   if (!eph) throw new Error('No zkLogin session — please sign in again.');
 
@@ -62,5 +76,37 @@ export async function zkLoginSignAndExecute(
   }).then((r) => r.json());
 
   if (!res.digest) throw new Error(res.detail ?? res.error ?? 'zkLogin execute failed');
-  return { digest: res.digest };
+  return {
+    digest: res.digest,
+    effects: res.effects,
+    events: res.events,
+    objectChanges: res.objectChanges,
+  };
+}
+
+/**
+ * Mint and cache the zkLogin Groth16 proof ahead of any transaction.
+ *
+ * The proof depends only on the ephemeral session (not on any transaction) and costs ~2-4s, so
+ * minting it while the user is still on the wallet screen removes it from the first send entirely.
+ * Fire-and-forget: a failure here just means the first transaction pays for it as before.
+ */
+export async function prewarmZkLoginProof(): Promise<boolean> {
+  const eph = loadEphemeral();
+  if (!eph) return false;
+  try {
+    const res = await fetch('/api/zklogin/execute', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prewarmOnly: true,
+        ephemeralPubKeyB64: eph.publicKeyB64,
+        maxEpoch: eph.maxEpoch,
+        randomness: eph.randomness,
+      }),
+    }).then((r) => r.json());
+    return res?.prewarmed === true;
+  } catch {
+    return false;
+  }
 }

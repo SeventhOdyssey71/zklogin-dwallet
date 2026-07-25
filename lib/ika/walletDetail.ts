@@ -5,8 +5,9 @@
  * so the addresses shown for receiving are exactly the ones the dWallet's MPC signing can spend.
  */
 
-import { SuiClient } from '@mysten/sui/client';
-import { IkaClient, getNetworkConfig, publicKeyFromDWalletOutput, Curve } from '@ika.xyz/sdk';
+import { publicKeyFromDWalletOutput, Curve } from '@ika.xyz/sdk';
+import type { AppSuiClient } from '@/lib/sui/client';
+import { getIkaClient } from '@/lib/ika/ikaClient';
 import { deriveChainAddresses } from '@/lib/utils/deriveAddresses';
 
 export interface DWalletAddresses {
@@ -18,19 +19,16 @@ export interface DWalletAddresses {
 }
 
 export async function getDWalletAddresses(
-  suiClient: SuiClient,
+  suiClient: AppSuiClient,
   dwalletId: string
 ): Promise<DWalletAddresses> {
-  const ikaClient = new IkaClient({
-    suiClient,
-    config: getNetworkConfig('testnet'),
-    cache: true,
-  });
-  await ikaClient.initialize();
+  const ikaClient = await getIkaClient(suiClient);
 
   const dWallet = await ikaClient.getDWallet(dwalletId);
-  const curveNumber = dWallet.curve;
-  const curveEnum = curveNumber === 0 ? Curve.SECP256K1 : Curve.ED25519;
+  const curveNumber = dWallet.curve as number;
+  // secp256k1=0, secp256r1=1, ed25519=2, ristretto=3
+  const curveEnum =
+    curveNumber === 0 ? Curve.SECP256K1 : curveNumber === 3 ? Curve.RISTRETTO : Curve.ED25519;
 
   const activeOutput = (dWallet.state as any).Active?.public_output;
   if (!activeOutput) {

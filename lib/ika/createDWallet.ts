@@ -1,5 +1,5 @@
 /**
- * Full zero-trust dWallet creation (DKG) in one call.
+ * Full zero-trust dWallet creation (DKG), batched across every Ika curve.
  *
  * Implements the canonical Ika flow proven in the SDK integration tests:
  *   prepareDKGAsync → registerEncryptionKey + requestDWalletDKG (tx #1)
@@ -9,38 +9,52 @@
  * It is verified cryptographically against the on-chain output (`userAndNetworkDKGOutputMatch`), so a
  * regenerated output always fails with "User public output does not match the DWallet public output".
  * We keep it in memory and chain straight into accept — no localStorage round-trip, no regeneration.
+ *
+ * `createBothDWallets` is the only entry point; pass `skip` to create a subset. A separate
+ * single-curve function used to exist and resolved the encrypted-share id by parsing the DKG event —
+ * which never worked (see the note on `shareByDWallet`) — so it was removed rather than left as a
+ * second copy of the same bug.
  */
 
 import { Transaction } from '@mysten/sui/transactions';
-import { SuiClient } from '@mysten/sui/client';
 import {
   IkaClient,
   IkaTransaction,
   Curve,
   prepareDKGAsync,
-  UserShareEncryptionKeys,
-  getNetworkConfig,
   createRandomSessionIdentifier,
   publicKeyFromDWalletOutput,
 } from '@ika.xyz/sdk';
 import { ethers } from 'ethers';
+import type { AppSuiClient } from '@/lib/sui/client';
+import { IKA_CONFIG } from '@/lib/config/network';
+import { prepareIkaFeeCoin } from '@/lib/ika/ikaFee';
+import { getIkaClient } from '@/lib/ika/ikaClient';
+import { getShareEncryptionKeys } from '@/lib/ika/shareKeys';
 
-export type DWalletKind = 'ECDSA' | 'EdDSA';
+/**
+ * A dWallet kind is really just "which Ika curve".
+ *
+ * Ika exposes four on mainnet, all pool-served under 2PC-MPC v4. Three are wired up here:
+ *   ECDSA      secp256k1  → Bitcoin + every EVM chain (Ethereum, Base, Arbitrum, OP, Polygon,
+ *                             Avalanche, BSC, Linea, Scroll)
+ *   EdDSA      ed25519    → Solana, NEAR, Cardano
+ *   Schnorrkel ristretto  → Polkadot / Substrate with its NATIVE sr25519 scheme
+ *
+ * SECP256R1 (P-256) is the fourth. It is live and pool-served, but no chain this app targets uses
+ * it natively — it is the WebAuthn/passkey curve, and on-chain its main use is Sui's own secp256r1
+ * accounts. It is intentionally omitted rather than shipped as a wallet with no chains behind it.
+ */
+export type DWalletKind = 'ECDSA' | 'EdDSA' | 'Schnorrkel';
 
-const IKA_PACKAGE_ID =
-  process.env.NEXT_PUBLIC_IKA_PACKAGE_ID ||
-  '0x1f26bb2f711ff82dcda4d02c77d5123089cb7f8418751474b9fb744ce031526a';
-
-const STATE_POLL = { timeout: 300000, interval: 2000 } as const;
-
-export interface CreateDWalletParams {
-  suiClient: SuiClient;
-  account: { address: string };
-  /** Signs + executes a Sui transaction. In this app, backed by zkLogin (lib/zklogin/execute.ts). */
-  signAndExecuteAsync: (input: { transaction: Transaction }) => Promise<{ digest: string }>;
-  kind: DWalletKind;
-  onStatus?: (step: CreateStep, message: string) => void;
-}
+/**
+ * dWallet state polling.
+ *
+ * The DKG rounds are network-bound (real MPC across 100+ validators), not client-bound, so this is
+ * a genuine wait rather than dead time — but 2s granularity meant routinely overshooting completion
+ * by a second or two. 400ms tracks it closely without hammering the RPC.
+ */
+const STATE_POLL = { timeout: 300000, interval: 400 } as const;
 
 export type CreateStep =
   | 'init'
@@ -82,201 +96,359 @@ function base58Encode(bytes: Uint8Array): string {
   return result;
 }
 
+/** Ika curve for each dWallet kind. */
+export const CURVE_FOR: Record<DWalletKind, Curve> = {
+  ECDSA: Curve.SECP256K1,
+  EdDSA: Curve.ED25519,
+  Schnorrkel: Curve.RISTRETTO,
+};
+
+/** Move curve discriminants, as read from the coordinator's on-chain config. */
+export const CURVE_NUMBER: Record<DWalletKind, number> = {
+  ECDSA: 0,
+  EdDSA: 2,
+  Schnorrkel: 3,
+};
+
+/**
+ * Curve name used in the encryption-seed formula.
+ *
+ * IMPORTANT: 'secp256k1' and 'ed25519' must keep their exact historical spellings — the seed is
+ * derived from this string, so changing it would derive a different user share and orphan every
+ * existing dWallet of that curve.
+ */
+const CURVE_SEED_NAME: Record<number, string> = {
+  [Curve.SECP256K1 as unknown as number]: 'secp256k1',
+  [Curve.ED25519 as unknown as number]: 'ed25519',
+  [Curve.RISTRETTO as unknown as number]: 'ristretto',
+};
+
 /** Deterministic encryption seed — same formula across the app so the user share is recoverable. */
 function deterministicSeed(suiAddress: string, curve: Curve): Uint8Array {
-  const curveString = curve === Curve.SECP256K1 ? 'secp256k1' : 'ed25519';
+  const curveString = CURVE_SEED_NAME[curve as unknown as number] ?? String(curve);
   return ethers.getBytes(ethers.keccak256(ethers.toUtf8Bytes(`ika-dwallet-${suiAddress}-${curveString}`)));
 }
 
-export async function createDWallet(params: CreateDWalletParams): Promise<CreatedDWallet> {
-  const { suiClient, account, signAndExecuteAsync, kind, onStatus } = params;
+// ─────────────────────────────────────────────────────────────────────────────
+// Batched dual-curve creation
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── Narrow shapes for the loosely-typed RPC / SDK values this flow reads ──
+/** `effects` comes back as BCS or JSON depending on the node; we only need the status. */
+type TxStatus = { status?: { status?: string; error?: string } } | string | null | undefined;
+const txFailed = (effects: TxStatus): string | null => {
+  if (!effects || typeof effects === 'string') return null;
+  return effects.status?.status === 'success' ? null : (effects.status?.error ?? 'transaction failed');
+};
+
+type CreatedObjectChange = { type: string; objectType?: string; objectId?: string };
+type CapContent = { fields?: { dwallet_id?: string } };
+type ActiveState = { Active?: { public_output?: number[] } };
+
+
+/**
+ * Create BOTH dWallets (ECDSA/secp256k1 + EdDSA/ed25519) in two transactions instead of four.
+ *
+ * A dWallet key lives on exactly one curve, so covering all nine chains needs two of them. Running
+ * `createDWallet` twice costs 4 Sui transactions and 4 zkLogin signatures. The two DKGs are wholly
+ * independent, so both can be batched into a single programmable transaction block, and likewise
+ * both accepts:
+ *
+ *   tx #1  registerEncryptionKey(k1) + requestDWalletDKG(k1)
+ *          registerEncryptionKey(ed) + requestDWalletDKG(ed)
+ *   ── wait for both to reach AwaitingKeyHolderSignature (concurrently) ──
+ *   tx #2  acceptEncryptedUserShare(k1) + acceptEncryptedUserShare(ed)
+ *   ── wait for both Active (concurrently) ──
+ *
+ * Two details make this safe, both verified against the deployed mainnet package:
+ *
+ *  • `request_dwallet_dkg` and `register_encryption_key` take the IKA and SUI coins as
+ *    `&mut Coin<T>`, not by value (checked via sui_getNormalizedMoveFunction). Fees are deducted
+ *    through the mutable reference, so one coin object legitimately funds both calls in the same
+ *    PTB. Were they by-value, the first call would consume the coin and the second would abort.
+ *
+ *  • Each curve needs its own `UserShareEncryptionKeys` (they are derived per-curve) and its own
+ *    session identifier. Two `IkaTransaction` builders therefore wrap the *same* `Transaction`;
+ *    they only append Move calls, so sharing the underlying tx is fine.
+ *
+ * The user approves 2 transactions instead of 4, and the two MPC DKGs proceed in parallel on the
+ * network rather than one after the other.
+ */
+/** Every kind this app creates, in display order. */
+export const ALL_KINDS: DWalletKind[] = ['ECDSA', 'EdDSA', 'Schnorrkel'];
+
+export interface CreateBothParams {
+  suiClient: AppSuiClient;
+  account: { address: string };
+  signAndExecuteAsync: (input: { transaction: Transaction }) => Promise<{ digest: string }>;
+  onStatus?: (step: CreateStep, message: string) => void;
+  /** Skip curves the account already has, so this is safe to re-run after a partial failure. */
+  skip?: DWalletKind[];
+}
+
+export async function createBothDWallets(
+  params: CreateBothParams
+): Promise<CreatedDWallet[]> {
+  const { suiClient, account, signAndExecuteAsync, onStatus, skip = [] } = params;
   const status = (step: CreateStep, message: string) => {
     console.log(`[${step}] ${message}`);
     onStatus?.(step, message);
   };
 
-  const curve = kind === 'ECDSA' ? Curve.SECP256K1 : Curve.ED25519;
+  const kinds: DWalletKind[] = ALL_KINDS.filter((k) => !skip.includes(k));
+  if (kinds.length === 0) return [];
 
-  status('init', 'Connecting to Ika network…');
-  const ikaClient = new IkaClient({
-    suiClient,
-    config: getNetworkConfig('testnet'),
-    cache: true,
-  });
-  await ikaClient.initialize();
+  status('init', 'Connecting to Ika mainnet…');
+  const ikaClient = await getIkaClient(suiClient);
 
-  // Need an IKA coin to pay MPC fees.
-  const ikaCoins = await suiClient.getCoins({
-    owner: account.address,
-    coinType: `${IKA_PACKAGE_ID}::ika::IKA`,
-  });
-  if (ikaCoins.data.length === 0) {
-    throw new Error('No IKA tokens found. Get testnet IKA from https://faucet.ika.xyz/');
-  }
-  const largestIkaCoin = ikaCoins.data.reduce((prev, cur) =>
-    BigInt(cur.balance) > BigInt(prev.balance) ? cur : prev
+  status('prepare', `Preparing key generation for ${kinds.join(' + ')}…`);
+
+  /**
+   * Warm the protocol public parameters for every curve concurrently.
+   *
+   * These are ~44 MB *per curve* (genuinely different data — verified distinct lengths and hashes),
+   * and `prepareDKGAsync` fetches them lazily. Left alone they download one after another inside the
+   * per-curve work, so three curves serialise ~30s of transfer. Prewarming in parallel overlaps the
+   * transfers instead. This only pays off now that key derivation is cached — previously the blocking
+   * wasm keygen filled the same wall-clock either way.
+   */
+  const [latestNetworkKey] = await Promise.all([
+    ikaClient.getLatestNetworkEncryptionKey(),
+    ...kinds.map((k) =>
+      ikaClient
+        .getProtocolPublicParameters(undefined, CURVE_FOR[k])
+        .catch(() => undefined) // prepareDKGAsync will fetch it itself if this fails
+    ),
+  ]);
+
+  // Per-curve crypto prep, in parallel — this is CPU/wasm work, not network-bound.
+  const prepared = await Promise.all(
+    kinds.map(async (kind) => {
+      const curve = CURVE_FOR[kind];
+      const sessionIdentifierBytes = createRandomSessionIdentifier();
+      const userShareEncryptionKeys = await getShareEncryptionKeys({
+        suiAddress: account.address,
+        curve,
+        rootSeed: deterministicSeed(account.address, curve),
+      });
+      const dkgRequestInput = await prepareDKGAsync(
+        ikaClient,
+        curve,
+        userShareEncryptionKeys,
+        sessionIdentifierBytes,
+        account.address
+      );
+      // Only register the encryption key if it isn't already on chain.
+      let needsRegistration = true;
+      try {
+        await ikaClient.getActiveEncryptionKey(userShareEncryptionKeys.getSuiAddress());
+        needsRegistration = false;
+      } catch {
+        needsRegistration = true;
+      }
+      return {
+        kind,
+        curve,
+        sessionIdentifierBytes,
+        userShareEncryptionKeys,
+        dkgRequestInput,
+        needsRegistration,
+      };
+    })
   );
 
-  status('prepare', 'Preparing distributed key generation…');
-  const encryptionSeed = deterministicSeed(account.address, curve);
-  const sessionIdentifierBytes = createRandomSessionIdentifier();
-  const userShareEncryptionKeys = await UserShareEncryptionKeys.fromRootSeedKey(encryptionSeed, curve);
-
-  const latestNetworkKey = await ikaClient.getLatestNetworkEncryptionKey();
-  const dkgRequestInput = await prepareDKGAsync(
-    ikaClient,
-    curve,
-    userShareEncryptionKeys,
-    sessionIdentifierBytes,
-    account.address
-  );
-
-  // ---- Transaction #1: register encryption key (if needed) + request DKG ----
-  status('request', 'Requesting dWallet creation — approve in your wallet…');
+  // ── Transaction #1: both DKG requests in one PTB ──
+  status('request', `Creating ${kinds.length} dWallets in one transaction — approve in your wallet…`);
   const tx = new Transaction();
-  const ikaTx = new IkaTransaction({ ikaClient, transaction: tx, userShareEncryptionKeys });
+  tx.setSender(account.address);
+  const ikaFee = await prepareIkaFeeCoin({ tx, suiClient, owner: account.address });
+  const ikaCoin = ikaFee.coin;
 
-  const sessionIdentifier = ikaTx.registerSessionIdentifier(sessionIdentifierBytes);
-
-  // Register the encryption key only if it isn't already on-chain.
-  let needsRegistration = true;
-  try {
-    await ikaClient.getActiveEncryptionKey(userShareEncryptionKeys.getSuiAddress());
-    needsRegistration = false;
-  } catch {
-    needsRegistration = true;
+  for (const p of prepared) {
+    // A separate builder per curve (each carries curve-specific encryption keys), same underlying tx.
+    const ikaTx = new IkaTransaction({
+      ikaClient,
+      transaction: tx,
+      userShareEncryptionKeys: p.userShareEncryptionKeys,
+    });
+    const sessionIdentifier = ikaTx.registerSessionIdentifier(p.sessionIdentifierBytes);
+    if (p.needsRegistration) {
+      await ikaTx.registerEncryptionKey({ curve: p.curve });
+    }
+    const [dWalletCap] = await ikaTx.requestDWalletDKG({
+      dkgRequestInput: p.dkgRequestInput,
+      ikaCoin, // &mut Coin<IKA> — safely reused across both calls
+      suiCoin: tx.gas,
+      sessionIdentifier,
+      dwalletNetworkEncryptionKeyId: latestNetworkKey.id,
+      curve: p.curve,
+    });
+    tx.transferObjects([dWalletCap], account.address);
   }
-  if (needsRegistration) {
-    await ikaTx.registerEncryptionKey({ curve });
-  }
-
-  const [dWalletCap] = await ikaTx.requestDWalletDKG({
-    dkgRequestInput,
-    ikaCoin: tx.object(largestIkaCoin.coinObjectId),
-    suiCoin: tx.gas,
-    sessionIdentifier,
-    dwalletNetworkEncryptionKeyId: latestNetworkKey.id,
-    curve,
-  });
-  tx.transferObjects([dWalletCap], account.address);
+  // Both DKG calls only borrow the fee coin, so return the remainder once, after the loop.
+  ikaFee.settle();
 
   const requestResult = await signAndExecuteAsync({ transaction: tx });
-
-  // Wait for indexing and read the created objects + DKG event.
   const requestDetails = await suiClient.waitForTransaction({
     digest: requestResult.digest,
     options: { showObjectChanges: true, showEvents: true, showEffects: true },
   });
+  const requestFailure = txFailed(requestDetails.effects as TxStatus);
+  if (requestFailure) throw new Error(`Batched dWallet creation failed: ${requestFailure}`);
 
-  if ((requestDetails.effects as any)?.status?.status !== 'success') {
+  // Resolve each created DWalletCap → dwallet_id. Both caps land in this one transaction, so match
+  // them back to curves by reading each dWallet's `curve` field rather than relying on ordering.
+  const capIds: string[] = [];
+  for (const change of requestDetails.objectChanges ?? []) {
+    const c = change as CreatedObjectChange;
+    if (c.type === 'created' && c.objectType?.includes('DWalletCap') && c.objectId) {
+      capIds.push(c.objectId);
+    }
+  }
+  if (capIds.length < prepared.length) {
+    throw new Error(`Expected ${prepared.length} DWalletCaps, found ${capIds.length}`);
+  }
+
+  const caps = await Promise.all(
+    capIds.map(async (capId) => {
+      const obj = await suiClient.getObject({ id: capId, options: { showContent: true } });
+      const dwalletId = (obj.data?.content as CapContent | undefined)?.fields?.dwallet_id;
+      if (!dwalletId) throw new Error(`Could not read dwallet_id from cap ${capId}`);
+      const dWallet = await ikaClient.getDWallet(dwalletId);
+      return { capId, dwalletId, curveNumber: dWallet.curve as number };
+    })
+  );
+
+  /**
+   * Map each created EncryptedUserSecretKeyShare to its dWallet.
+   *
+   * Read from `objectChanges` and each share object's own `dwallet_id`, NOT from the DKG event. The
+   * event nests the share as `{ variant: 'Encrypted', fields: {...} }` — a BCS enum, not the
+   * `{ Encrypted: {...} }` shape a naive accessor expects — and it carries no share id at all, so
+   * event-based lookup silently produced `undefined` and only surfaced on the third curve.
+   */
+  const shareIds: string[] = [];
+  for (const change of requestDetails.objectChanges ?? []) {
+    const c = change as CreatedObjectChange;
+    if (
+      c.type === 'created' &&
+      c.objectType?.includes('EncryptedUserSecretKeyShare') &&
+      c.objectId
+    ) {
+      shareIds.push(c.objectId);
+    }
+  }
+  const shareByDWallet = new Map<string, string>();
+  await Promise.all(
+    shareIds.map(async (shareId) => {
+      const obj = await suiClient.getObject({ id: shareId, options: { showContent: true } });
+      const content = obj.data?.content;
+      if (!content || content.dataType !== 'moveObject') return;
+      const dwalletId = (content.fields as { dwallet_id?: string }).dwallet_id;
+      if (dwalletId) shareByDWallet.set(dwalletId, shareId);
+    })
+  );
+  if (shareByDWallet.size < prepared.length) {
     throw new Error(
-      (requestDetails.effects as any)?.status?.error || 'dWallet creation transaction failed'
+      `Expected ${prepared.length} encrypted user shares, resolved ${shareByDWallet.size}`
     );
   }
 
-  // DWalletCap id from object changes → its dwallet_id field.
-  let dwalletCapId: string | undefined;
-  for (const change of requestDetails.objectChanges ?? []) {
-    if (change.type === 'created' && (change as any).objectType?.includes('DWalletCap')) {
-      dwalletCapId = (change as any).objectId;
-      break;
-    }
-  }
-  if (!dwalletCapId) throw new Error('Could not find created DWalletCap');
-
-  const capObject = await suiClient.getObject({ id: dwalletCapId, options: { showContent: true } });
-  const dwalletId = (capObject.data?.content as any)?.fields?.dwallet_id;
-  if (!dwalletId) throw new Error('Could not extract dWallet id from DWalletCap');
-
-  // Encrypted-share id from the DKG event (canonical source).
-  let encryptedShareId: string | undefined;
-  try {
-    const dkgEvent = requestDetails.events?.find((e: any) => e.type?.includes('DWalletDKGRequestEvent'));
-    const ed = (dkgEvent?.parsedJson as any)?.event_data ?? (dkgEvent?.parsedJson as any);
-    encryptedShareId =
-      ed?.user_secret_key_share?.Encrypted?.encrypted_user_secret_key_share_id ||
-      ed?.encrypted_user_secret_key_share_id;
-  } catch {
-    // resolved from chain below if missing
-  }
-
-  // ---- Wait for the network DKG round to finish ----
+  // ── Wait for both network DKG rounds, concurrently ──
   status('awaiting-network', 'Network is generating your key shares (2PC-MPC)…');
-  const awaitingDWallet = await ikaClient.getDWalletInParticularState(
-    dwalletId,
-    'AwaitingKeyHolderSignature',
-    STATE_POLL
+  const awaiting = await Promise.all(
+    prepared.map(async (p) => {
+      const match = caps.find((c) => c.curveNumber === CURVE_NUMBER[p.kind]);
+      if (!match) throw new Error(`No created dWallet found for ${p.kind}`);
+
+      const dWallet = await ikaClient.getDWalletInParticularState(
+        match.dwalletId,
+        'AwaitingKeyHolderSignature',
+        STATE_POLL
+      );
+
+      const encryptedShareId = shareByDWallet.get(match.dwalletId);
+      if (!encryptedShareId) {
+        throw new Error(
+          `Could not resolve the encrypted user share id for ${p.kind} ` +
+            `(dWallet ${match.dwalletId}). Shares found: ${[...shareByDWallet.keys()].join(', ') || 'none'}`
+        );
+      }
+
+      return { ...p, ...match, dWallet, encryptedShareId };
+    })
   );
 
-  // Resolve the encrypted share id if the event didn't give it.
-  if (!encryptedShareId) {
-    const tableId = (awaitingDWallet as any).encrypted_user_secret_key_shares?.id?.id;
-    if (tableId) {
-      const fields = await suiClient.getDynamicFields({ parentId: tableId });
-      for (const f of fields.data ?? []) {
-        try {
-          const share: any = await ikaClient.getEncryptedUserSecretKeyShare(f.objectId);
-          if (share) {
-            encryptedShareId = share.id?.id ?? f.objectId;
-            break;
-          }
-        } catch {
-          /* try next */
-        }
-      }
-    }
-  }
-  if (!encryptedShareId) throw new Error('Could not resolve the encrypted user share id');
-
-  // ---- Transaction #2: accept the encrypted user share ----
-  status('accept', 'Finalizing your dWallet — approve in your wallet…');
+  // ── Transaction #2: both accepts in one PTB ──
+  status('accept', 'Finalizing both dWallets — approve in your wallet…');
   const acceptTx = new Transaction();
-  const acceptIkaTx = new IkaTransaction({
-    ikaClient,
-    transaction: acceptTx,
-    userShareEncryptionKeys,
-  });
-  await acceptIkaTx.acceptEncryptedUserShare({
-    dWallet: awaitingDWallet as any,
-    userPublicOutput: dkgRequestInput.userPublicOutput,
-    encryptedUserSecretKeyShareId: encryptedShareId,
-  });
-  acceptTx.setGasBudget(50000000);
+  for (const a of awaiting) {
+    const acceptIkaTx = new IkaTransaction({
+      ikaClient,
+      transaction: acceptTx,
+      userShareEncryptionKeys: a.userShareEncryptionKeys,
+    });
+    await acceptIkaTx.acceptEncryptedUserShare({
+      dWallet: a.dWallet as Parameters<typeof acceptIkaTx.acceptEncryptedUserShare>[0]['dWallet'],
+      userPublicOutput: a.dkgRequestInput.userPublicOutput,
+      encryptedUserSecretKeyShareId: a.encryptedShareId,
+    });
+  }
+  // No explicit gas budget — the SDK dry-runs for a real estimate. A fixed budget is reserved in
+  // full, so it fails on a modest balance even when the true cost is a fraction of it.
 
   const acceptResult = await signAndExecuteAsync({ transaction: acceptTx });
   const acceptDetails = await suiClient.waitForTransaction({
     digest: acceptResult.digest,
     options: { showEffects: true },
   });
-  if ((acceptDetails.effects as any)?.status?.status !== 'success') {
-    throw new Error((acceptDetails.effects as any)?.status?.error || 'Activation transaction failed');
-  }
+  const acceptFailure = txFailed(acceptDetails.effects as TxStatus);
+  if (acceptFailure) throw new Error(`Activation failed: ${acceptFailure}`);
 
   status('activating', 'Waiting for activation to confirm…');
-  const activeDWallet = await ikaClient.getDWalletInParticularState(dwalletId, 'Active', STATE_POLL);
+  const results = await Promise.all(
+    awaiting.map(async (a) => {
+      const active = await ikaClient.getDWalletInParticularState(a.dwalletId, 'Active', STATE_POLL);
+      const { publicKey, address } = await deriveDisplay(active, a.curve);
+      return {
+        dwalletId: a.dwalletId,
+        dwalletCapId: a.capId,
+        curve: a.kind,
+        publicKey,
+        address,
+      } satisfies CreatedDWallet;
+    })
+  );
 
-  // Derive a display address + public key from the active dWallet.
-  let publicKey = '';
-  let address = '';
+  status('done', `${results.length} dWallet${results.length > 1 ? 's are' : ' is'} active!`);
+  return results;
+}
+
+/** Shared display derivation: active dWallet → public key hex + primary chain address. */
+async function deriveDisplay(
+  activeDWallet: Awaited<ReturnType<IkaClient['getDWallet']>>,
+  curve: Curve
+): Promise<{ publicKey: string; address: string }> {
   try {
-    const pubOutput = (activeDWallet.state as any).Active?.public_output;
-    if (pubOutput) {
-      const pk = await publicKeyFromDWalletOutput(curve, Uint8Array.from(pubOutput));
-      publicKey = '0x' + Buffer.from(pk).toString('hex');
-      if (curve === Curve.SECP256K1) {
-        const { SigningKey, computeAddress } = await import('ethers');
-        const uncompressed =
-          pk.length === 33 ? SigningKey.computePublicKey('0x' + Buffer.from(pk).toString('hex'), false) : publicKey;
-        address = computeAddress(uncompressed);
-      } else {
-        // ED25519: the 32-byte public key base58-encoded IS the Solana address.
-        address = base58Encode(pk);
-      }
+    const pubOutput = (activeDWallet.state as ActiveState).Active?.public_output;
+    if (!pubOutput) return { publicKey: '', address: '' };
+
+    const pk = await publicKeyFromDWalletOutput(curve, Uint8Array.from(pubOutput));
+    const publicKey = '0x' + Buffer.from(pk).toString('hex');
+
+    if (curve === Curve.SECP256K1) {
+      const { SigningKey, computeAddress } = await import('ethers');
+      const uncompressed = pk.length === 33 ? SigningKey.computePublicKey(publicKey, false) : publicKey;
+      return { publicKey, address: computeAddress(uncompressed) };
     }
+    if (curve === Curve.RISTRETTO) {
+      // sr25519 public keys are 32 bytes and encode to SS58 exactly like ed25519 ones.
+      const { deriveSs58Address } = await import('@/lib/utils/deriveMoreAddresses');
+      return { publicKey, address: deriveSs58Address(publicKey, 0) };
+    }
+    return { publicKey, address: base58Encode(pk) };
   } catch (e) {
     console.warn('Could not derive display address:', e);
+    return { publicKey: '', address: '' };
   }
-
-  status('done', 'dWallet is active!');
-  return { dwalletId, dwalletCapId, curve: kind, publicKey, address };
 }

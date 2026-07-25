@@ -11,7 +11,7 @@
 
 import { ApiPromise, WsProvider } from '@polkadot/api';
 import { ChainSigner, UnsignedTransaction, SignedTransactionResult } from '../core/types';
-import { POLKADOT_TESTNET } from '../../config/chains';
+import { POLKADOT_MAINNET } from '../../config/chains';
 
 /**
  * Polkadot chain signer for Paseo AssetHub
@@ -29,7 +29,7 @@ export class PolkadotSigner implements ChainSigner {
     }
 
     console.log('🔗 Connecting to Polkadot AssetHub...');
-    this.provider = new WsProvider(POLKADOT_TESTNET.rpcUrl);
+    this.provider = new WsProvider(POLKADOT_MAINNET.rpcUrl);
 
     // Set connection timeout
     const timeoutPromise = new Promise<never>((_, reject) => {

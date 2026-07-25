@@ -11,6 +11,12 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { createEphemeralSession, type EphemeralSession } from "@/lib/zklogin/zklogin";
+import { clearShareEncryptionKeys } from "@/lib/ika/shareKeys";
+import { resetIkaClient } from "@/lib/ika/ikaClient";
+import { clearPresignPool } from "@/lib/ika/presignPool";
+import { clearDWalletMeta } from "@/lib/dwallet/dwalletMeta";
+import { clearBalances } from "@/lib/balances/store";
+import { clearUserShares } from "@/lib/ika/userShare";
 
 const EPH_KEY = "zk.ephemeral";
 
@@ -48,6 +54,15 @@ export function useZkLogin() {
 
   const signOut = useCallback(async () => {
     sessionStorage.removeItem(EPH_KEY);
+    // Drop cached share-encryption keys too, so a shared machine doesn't carry them to the next user.
+    clearShareEncryptionKeys();
+    resetIkaClient();
+    clearPresignPool();
+    clearDWalletMeta();
+    // Balances are per-address; leaving them would show one user's funds to the next.
+    clearBalances();
+    // The decrypted key shares are the actual signing material — drop them first, not eventually.
+    clearUserShares();
     await fetch("/api/zklogin/logout", { method: "POST" }).catch(() => {});
     setUser(null);
   }, []);

@@ -1,22 +1,23 @@
 'use client';
 
 import { createNetworkConfig, SuiClientProvider } from '@mysten/dapp-kit';
-import { getFullnodeUrl } from '@mysten/sui/client';
 import { ReactNode } from 'react';
+import { SUI_RPC_URL } from '@/lib/config/network';
 
 // Auth is zkLogin (Google), not a browser wallet — so there's no dapp-kit WalletProvider.
 // We keep SuiClientProvider only for read access (useSuiClient) and for building/executing
-// transactions. CORS-friendly Sui testnet RPC first (official Mysten RPC blocks browser CORS).
-const TESTNET_RPC = 'https://sui-testnet.publicnode.com:443';
-
+// transactions.
+//
+// Mainnet only, deliberately: the Ika 2PC-MPC coordinator this app signs against is the mainnet
+// deployment, and a testnet Sui client would derive a different zkLogin address while otherwise
+// appearing to work. Registering just one network makes that mismatch impossible.
 const { networkConfig } = createNetworkConfig({
-  testnet: { url: TESTNET_RPC },
-  mainnet: { url: getFullnodeUrl('mainnet') },
+  mainnet: { url: SUI_RPC_URL, network: 'mainnet' },
 });
 
 export function SuiWalletProvider({ children }: { children: ReactNode }) {
   return (
-    <SuiClientProvider networks={networkConfig} defaultNetwork="testnet">
+    <SuiClientProvider networks={networkConfig} defaultNetwork="mainnet">
       {children}
     </SuiClientProvider>
   );

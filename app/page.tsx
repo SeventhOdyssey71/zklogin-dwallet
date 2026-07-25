@@ -1,32 +1,35 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useSuiClient } from '@mysten/dapp-kit';
 import { toast } from 'sonner';
-import { Check, Loader2, Copy } from 'lucide-react';
-import { ConnectWallet } from '@/components/ConnectWallet';
+import { Check, Loader2, RefreshCw } from 'lucide-react';
 import { SendModal } from '@/components/SendModal';
-import { GasBalances } from '@/components/GasBalances';
+import { PresignPoolBadge } from '@/components/PresignPoolBadge';
+import { NavBar, type NavTab } from '@/components/NavBar';
+import { ConnectWallet } from '@/components/ConnectWallet';
 import { useZkLogin } from '@/lib/useZkLogin';
 import { zkLoginSignAndExecute } from '@/lib/zklogin/execute';
-import { createDWallet, CreateStep, CreatedDWallet, DWalletKind } from '@/lib/ika/createDWallet';
+import { createBothDWallets, ALL_KINDS, CreateStep, CreatedDWallet, DWalletKind } from '@/lib/ika/createDWallet';
 import { listDWallets, OwnedDWallet } from '@/lib/ika/listDWallets';
+import { IKA_ACQUIRE_URL } from '@/lib/config/network';
+import { CHAINS } from '@/lib/config/chainRegistry';
+import { AllChainChips, useChainAssets, chainCount } from '@/components/ChainChips';
+import { SuiWalletView } from '@/components/SuiWalletView';
+import { Button, CopyField, ErrorNote, Skeleton, truncate } from '@/components/ui';
+import { useBalances, useAgeLabel, REFRESH_SECONDS, type BalanceTarget } from '@/lib/balances/useBalances';
+import type { Entry as BalanceEntry } from '@/lib/balances/store';
+import { friendlyError, type FriendlyError } from '@/lib/ui/errors';
+import { addressUrl } from '@/lib/config/chainRegistry';
 
 /** Minimal account shape used across views (zkLogin user → Sui address). */
 type ZkAccount = { address: string } | null;
 
-const CHAIN_SYMBOLS: Record<string, string> = {
-  Bitcoin: 'BTC',
-  Ethereum: 'ETH',
-  Polygon: 'MATIC',
-  Avalanche: 'AVAX',
-  BSC: 'BNB',
-  Solana: 'SOL',
-  Polkadot: 'DOT',
-  Cardano: 'ADA',
-  NEAR: 'NEAR',
-};
+// Symbols come from the chain registry so a new chain needs one entry, not several.
+const CHAIN_SYMBOLS: Record<string, string> = Object.fromEntries(
+  CHAINS.map((c) => [c.id, c.symbol])
+);
 
 const fmtUsd = (v: number) =>
   v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -41,95 +44,93 @@ const STEPS: { key: CreateStep; label: string }[] = [
   { key: 'done', label: 'Active' },
 ];
 
-const KINDS: { kind: DWalletKind; title: string; curve: string; chains: string }[] = [
-  { kind: 'ECDSA', title: 'ECDSA', curve: 'secp256k1', chains: 'Ethereum · Bitcoin · Polygon · BSC · Avalanche' },
-  { kind: 'EdDSA', title: 'EdDSA', curve: 'ed25519', chains: 'Solana · Polkadot · Cardano · NEAR' },
-];
-
-type Tab = 'create' | 'wallets' | 'all';
-
+// Display order: majors first, then L2s, then the non-EVM chains. Driven off the registry so a
+// chain can never be listed here but missing from the app (or vice versa).
 const CHAIN_ORDER = [
   'Bitcoin',
   'Ethereum',
+  'Base',
+  'Arbitrum',
+  'Optimism',
   'Polygon',
   'Avalanche',
   'BSC',
+  'Linea',
+  'Scroll',
   'Solana',
-  'Polkadot',
-  'Cardano',
   'NEAR',
+  'Cardano',
+  'Polkadot',
 ];
 
+const TAB_KEYS: NavTab[] = ['create', 'wallets', 'all', 'sui'];
+
+/**
+ * Keep the active tab in the URL hash.
+ *
+ * Tab state lived only in React, so a refresh — or the redirect back from Google sign-in — always dumped
+ * you on Create, even if you were three clicks into All chains. The hash also makes a view linkable and
+ * gives the browser Back button something sensible to do.
+ */
+function useTabFromHash(): [NavTab, (t: NavTab) => void] {
+  const [tab, setTab] = useState<NavTab>('create');
+
+  useEffect(() => {
+    const read = () => {
+      const fromHash = window.location.hash.replace('#', '') as NavTab;
+      if (TAB_KEYS.includes(fromHash)) setTab(fromHash);
+    };
+    read();
+    window.addEventListener('hashchange', read);
+    return () => window.removeEventListener('hashchange', read);
+  }, []);
+
+  const go = useCallback((t: NavTab) => {
+    setTab(t);
+    // replaceState rather than assigning `hash`: this shouldn't add a history entry per tab click.
+    window.history.replaceState(null, '', `#${t}`);
+  }, []);
+
+  return [tab, go];
+}
+
 export default function Home() {
-  const { user } = useZkLogin();
+  const { user, loading } = useZkLogin();
   const account: ZkAccount = user ? { address: user.address } : null;
-  const [tab, setTab] = useState<Tab>('create');
+  const [tab, setTab] = useTabFromHash();
+
+  // Signed-out users only have Create; landing on a hash for a signed-in view would show an empty shell.
+  const view = account ? tab : 'create';
 
   return (
     <main className="relative z-10 min-h-screen flex flex-col">
-      <header className="flex flex-wrap items-center justify-between gap-3 px-5 sm:px-6 py-4 max-w-5xl mx-auto w-full">
-        <div className="flex items-center gap-4">
-          <span className="font-extrabold tracking-tight text-lg">dWallet</span>
-          {account && (
-            <nav className="flex items-center gap-1 text-sm">
-              <TabButton active={tab === 'create'} onClick={() => setTab('create')}>
-                Create
-              </TabButton>
-              <TabButton active={tab === 'wallets'} onClick={() => setTab('wallets')}>
-                My wallets
-              </TabButton>
-              <TabButton active={tab === 'all'} onClick={() => setTab('all')}>
-                All chains
-              </TabButton>
-            </nav>
-          )}
-        </div>
-        <ConnectWallet />
-      </header>
+      <NavBar tab={view} setTab={setTab} address={account?.address} />
 
-      {account && <GasBalances address={account.address} />}
-
-      <section
-        className={`flex-1 flex justify-center px-5 sm:px-6 py-10 ${
-          tab === 'create' ? 'items-center' : 'items-start'
-        }`}
-      >
-        <div className="w-full max-w-2xl">
-          {tab === 'create' && (
-            <CreateView account={account} onCreated={() => setTab('wallets')} />
+      {/* Content is centred in whatever space the navbar and footer leave, so a short page like
+          Create sits in the middle of the viewport rather than hugging the top. */}
+      <section className="flex-1 flex items-center justify-center px-4 sm:px-6 py-8">
+        <div className="w-full max-w-3xl">
+          {loading ? (
+            <div className="card p-10 flex items-center justify-center gap-3 text-sm text-[var(--muted)]">
+              <Loader2 className="w-4 h-4 animate-spin" aria-hidden /> Restoring your session…
+            </div>
+          ) : (
+            <>
+              {view === 'create' && (
+                <CreateView account={account} onCreated={() => setTab('wallets')} />
+              )}
+              {view === 'wallets' && (
+                <WalletsView account={account} onCreate={() => setTab('create')} />
+              )}
+              {view === 'all' && <AllChainsView account={account} onCreate={() => setTab('create')} />}
+              {view === 'sui' && account && <SuiWalletView address={account.address} />}
+            </>
           )}
-          {tab === 'wallets' && (
-            <WalletsView account={account} onCreate={() => setTab('create')} />
-          )}
-          {tab === 'all' && <AllChainsView account={account} onCreate={() => setTab('create')} />}
         </div>
       </section>
 
-      <footer className="text-center py-5 mono-label">Ika dWallets on Sui · built for linq</footer>
+      <footer className="text-center py-5 mono-label">built by 71labs</footer>
     </main>
-  );
-}
-
-function TabButton({
-  active,
-  onClick,
-  children,
-}: {
-  active: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      className={`px-3 py-1.5 rounded-[8px] whitespace-nowrap transition ${
-        active
-          ? 'bg-[var(--surface-2)] text-[var(--foreground)] border border-[var(--border)]'
-          : 'text-[var(--muted)] hover:text-[var(--foreground)]'
-      }`}
-    >
-      {children}
-    </button>
   );
 }
 
@@ -144,12 +145,12 @@ function CreateView({
 }) {
   const suiClient = useSuiClient();
 
-  const [kind, setKind] = useState<DWalletKind>('ECDSA');
+  const chainAssets = useChainAssets();
   const [creating, setCreating] = useState(false);
   const [activeStep, setActiveStep] = useState<CreateStep | null>(null);
   const [statusMsg, setStatusMsg] = useState('');
   const [result, setResult] = useState<CreatedDWallet | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<FriendlyError | null>(null);
 
   // Enforce: a zkLogin user may create at most ONE ECDSA and ONE EdDSA dWallet.
   const [existing, setExisting] = useState<Set<DWalletKind>>(new Set());
@@ -175,33 +176,43 @@ function CreateView({
     };
   }, [account?.address, suiClient, result]);
 
-  const alreadyHasKind = existing.has(kind);
-  const hasBoth = existing.has('ECDSA') && existing.has('EdDSA');
+  const hasBoth = ALL_KINDS.every((k) => existing.has(k));
 
   const stepIndex = activeStep ? STEPS.findIndex((s) => s.key === activeStep) : -1;
 
+  /**
+   * Create every curve the account is still missing, batched.
+   *
+   * Both DKGs ride in one programmable transaction block and both accepts in a second, so the user
+   * approves 2 transactions instead of 4 and the two MPC key generations run concurrently on the
+   * network rather than back to back. See `createBothDWallets`.
+   */
   const handleCreate = async () => {
-    if (!account || alreadyHasKind) return;
+    if (!account || hasBoth) return;
     setCreating(true);
     setError(null);
     setResult(null);
     try {
-      const created = await createDWallet({
+      const created = await createBothDWallets({
         suiClient,
         account,
         signAndExecuteAsync: (params) => zkLoginSignAndExecute(suiClient, account.address, params),
-        kind,
+        skip: Array.from(existing),
         onStatus: (step, message) => {
           setActiveStep(step);
           setStatusMsg(message);
         },
       });
-      setResult(created);
-      toast.success('dWallet is active', { description: created.address || created.dwalletId });
-    } catch (e: any) {
+      setResult(created[0] ?? null);
+      toast.success(
+        created.length > 1 ? `${created.length} dWallets are active` : 'dWallet is active',
+        { description: created.map((c) => c.curve).join(' + ') }
+      );
+    } catch (e) {
       console.error(e);
-      setError(e?.message || 'Failed to create dWallet');
-      toast.error('Creation failed', { description: e?.message?.slice(0, 80) });
+      const friendly = friendlyError(e);
+      setError(friendly);
+      toast.error('Creation failed', { description: friendly.message });
     } finally {
       setCreating(false);
     }
@@ -209,17 +220,23 @@ function CreateView({
 
   return (
     <>
-      <div className="mb-8 text-center">
-        <div className="mono-label mb-3">Ika 2PC-MPC · Sui testnet</div>
-        <h1 className="text-3xl sm:text-4xl font-extrabold tracking-tight leading-tight">
-          Create a multi-chain
-          <br />
-          dWallet in two signatures
+      <div className="mb-6 text-center">
+        <div className="mono-label mb-2">Ika 2PC-MPC v4 · Sui mainnet</div>
+        <h1 className="text-2xl sm:text-3xl md:text-4xl font-extrabold tracking-tight leading-tight text-balance">
+          One wallet. {chainCount()} chains.
         </h1>
-        <p className="text-[var(--muted)] text-sm mt-3 max-w-md mx-auto">
-          One key, split across the network — no single party ever holds it. Sign in with Google to
-          begin (one ECDSA + one EdDSA per account).
+        <p className="text-[var(--muted)] text-sm mt-2.5 max-w-lg mx-auto">
+          Keys split across the Ika network — no single party ever holds one. Send and receive on
+          every chain below.
         </p>
+        <PresignPoolBadge />
+        <div className="mt-3 flex flex-wrap items-center justify-center gap-x-1.5 text-[11px] text-[var(--muted)]">
+          <span aria-hidden>⚠</span>
+          <span>
+            <b className="text-[var(--foreground)]">Mainnet</b> — real assets, irreversible
+            transactions.
+          </span>
+        </div>
       </div>
 
       <AnimatePresence mode="wait">
@@ -232,19 +249,20 @@ function CreateView({
             className="card p-8 flex flex-col items-center gap-5 text-center"
           >
             <p className="text-sm text-[var(--muted)]">
-              Sign in with Google — your Sui address is derived via zkLogin (no wallet, no seed
-              phrase). Fund that address with testnet{' '}
+              Sign in with Google — your Sui mainnet address is derived via zkLogin (no wallet, no
+              seed phrase). Fund that address with{' '}
               <b className="text-[var(--foreground)]">SUI</b> (gas) and{' '}
-              <b className="text-[var(--foreground)]">IKA</b> to create dWallets.
+              <b className="text-[var(--foreground)]">IKA</b> (2PC-MPC session fees) to create
+              dWallets.
             </p>
             <ConnectWallet />
             <a
-              href="https://faucet.ika.xyz/"
+              href={IKA_ACQUIRE_URL}
               target="_blank"
               rel="noopener noreferrer"
               className="text-xs underline"
             >
-              Get IKA testnet tokens →
+              Swap SUI → IKA on Cetus →
             </a>
           </motion.div>
         )}
@@ -257,71 +275,30 @@ function CreateView({
             exit={{ opacity: 0, y: -8 }}
             className="space-y-4"
           >
-            <div className="grid sm:grid-cols-2 gap-3">
-              {KINDS.map((k) => {
-                const selected = kind === k.kind;
-                const owned = existing.has(k.kind);
-                return (
-                  <button
-                    key={k.kind}
-                    onClick={() => setKind(k.kind)}
-                    className={`card p-5 text-left transition relative ${
-                      selected
-                        ? 'border-[var(--foreground)] ring-1 ring-[var(--foreground)]/30'
-                        : 'hover:bg-[var(--surface-2)]'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between mb-2">
-                      <div className="font-bold">{k.title}</div>
-                      {owned ? (
-                        <span className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full border border-[var(--foreground)]">
-                          Created
-                        </span>
-                      ) : (
-                        selected && <Check className="w-4 h-4" />
-                      )}
-                    </div>
-                    <div className="mono-label mb-3">{k.curve}</div>
-                    <div className="text-xs text-[var(--muted)] leading-relaxed">{k.chains}</div>
-                  </button>
-                );
-              })}
+            {/* One wide block: from the outside these are just the chains the wallet covers.
+                Which Ika curve signs each one is an implementation detail, not a user-facing choice. */}
+            <div className="card p-4 sm:p-5">
+              <AllChainChips assets={chainAssets} />
             </div>
 
-            {error && (
-              <div className="card p-3 border-[var(--border)]">
-                <p className="text-xs text-[var(--foreground)] break-words">{error}</p>
-              </div>
-            )}
+            {error && <ErrorNote {...error} />}
 
             {hasBoth ? (
               <div className="card p-4 text-center space-y-3">
-                <p className="text-sm">
-                  You&apos;ve created both your <b>ECDSA</b> and <b>EdDSA</b> dWallets — that&apos;s the
-                  limit (one of each).
-                </p>
-                <button
-                  onClick={onCreated}
-                  className="px-4 py-2.5 rounded-[10px] bg-[var(--foreground)] text-black font-semibold text-sm hover:brightness-90 transition"
-                >
-                  View all chains
-                </button>
+                <p className="text-sm">Your wallet is ready across all {chainCount()} chains.</p>
+                <Button onClick={onCreated}>View all chains</Button>
               </div>
             ) : (
-              <>
-                <button
+              <div className="flex justify-center">
+                <Button
+                  size="lg"
                   onClick={handleCreate}
-                  disabled={checking || alreadyHasKind}
-                  className="w-full py-3.5 rounded-[12px] bg-[var(--foreground)] text-black font-bold hover:brightness-90 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                  loading={checking}
+                  className="w-full sm:w-auto sm:min-w-[240px]"
                 >
-                  {alreadyHasKind ? `${kind} already created` : `Create ${kind} dWallet`}
-                </button>
-                <p className="text-center text-[11px] text-[var(--muted)]">
-                  {alreadyHasKind
-                    ? 'Each account is limited to one ECDSA and one EdDSA dWallet. Pick the other curve.'
-                    : "You'll approve two transactions. Takes ~30–60s while the network runs MPC."}
-                </p>
-              </>
+                  {checking ? 'Checking your wallets…' : 'Create dWallet'}
+                </Button>
+              </div>
             )}
           </motion.div>
         )}
@@ -388,27 +365,27 @@ function CreateView({
               <div className="mono-label">{result.curve} · secured by 2PC-MPC</div>
             </div>
 
-            <Field label="dWallet ID" value={result.dwalletId} />
-            {result.address && <Field label="Address" value={result.address} />}
-            {result.publicKey && <Field label="Public key" value={result.publicKey} />}
+            <div className="space-y-3">
+              <CopyField label="dWallet ID" value={result.dwalletId} />
+              {result.address && <CopyField label="Address" value={result.address} />}
+              {result.publicKey && <CopyField label="Public key" value={result.publicKey} />}
+            </div>
 
             <div className="grid grid-cols-2 gap-3 mt-5">
-              <button
+              <Button
+                variant="secondary"
+                size="lg"
                 onClick={() => {
                   setResult(null);
                   setActiveStep(null);
                   setStatusMsg('');
                 }}
-                className="py-3 rounded-[12px] border border-[var(--border)] hover:bg-[var(--surface-2)] transition font-semibold text-sm"
               >
                 Create another
-              </button>
-              <button
-                onClick={onCreated}
-                className="py-3 rounded-[12px] bg-[var(--foreground)] text-black hover:brightness-90 transition font-semibold text-sm"
-              >
+              </Button>
+              <Button size="lg" onClick={onCreated}>
                 View my wallets
-              </button>
+              </Button>
             </div>
           </motion.div>
         )}
@@ -429,7 +406,7 @@ function WalletsView({
   const suiClient = useSuiClient();
   const [wallets, setWallets] = useState<OwnedDWallet[] | null>(null);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<FriendlyError | null>(null);
   const [selected, setSelected] = useState<OwnedDWallet | null>(null);
 
   const load = useCallback(async () => {
@@ -439,9 +416,9 @@ function WalletsView({
     try {
       const list = await listDWallets(suiClient, account.address);
       setWallets(list);
-    } catch (e: any) {
+    } catch (e) {
       console.error(e);
-      setError(e?.message || 'Failed to load wallets');
+      setError(friendlyError(e));
     } finally {
       setLoading(false);
     }
@@ -462,13 +439,9 @@ function WalletsView({
           <h1 className="text-2xl font-extrabold tracking-tight">My wallets</h1>
           <div className="mono-label mt-1">dWallets owned by this address</div>
         </div>
-        <button
-          onClick={load}
-          disabled={loading}
-          className="px-3 py-2 rounded-[10px] border border-[var(--border)] text-sm hover:bg-[var(--surface-2)] transition disabled:opacity-50"
-        >
+        <Button variant="secondary" onClick={load} loading={loading}>
           {loading ? 'Refreshing…' : 'Refresh'}
-        </button>
+        </Button>
       </div>
 
       {loading && !wallets && (
@@ -477,21 +450,12 @@ function WalletsView({
         </div>
       )}
 
-      {error && (
-        <div className="card p-3 border-[var(--border)]">
-          <p className="text-xs break-words">{error}</p>
-        </div>
-      )}
+      {error && <ErrorNote {...error} />}
 
       {wallets && wallets.length === 0 && !loading && (
         <div className="card p-8 text-center space-y-4">
           <p className="text-sm text-[var(--muted)]">No dWallets yet for this address.</p>
-          <button
-            onClick={onCreate}
-            className="px-4 py-2.5 rounded-[10px] bg-[var(--foreground)] text-black font-semibold text-sm hover:brightness-90 transition"
-          >
-            Create your first dWallet
-          </button>
+          <Button onClick={onCreate}>Create your first dWallet</Button>
         </div>
       )}
 
@@ -529,17 +493,28 @@ function WalletsView({
   );
 }
 
+/**
+ * A dWallet that never reached `Active` cannot be revived: finishing the DKG requires the exact
+ * `userPublicOutput` from the browser session that started it, and that value is not reproducible
+ * from the deterministic seed. So an interrupted creation leaves a permanently unusable dWallet —
+ * labelling it "Pending" would imply it is still going somewhere.
+ */
 function StateBadge({ state }: { state: string }) {
   const active = state === 'Active';
   return (
     <span
+      title={
+        active
+          ? 'Ready to sign'
+          : `Stuck at "${state}" — its DKG never finished, and it cannot be completed later. Create a new one.`
+      }
       className={`text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full border ${
         active
-          ? 'border-[var(--foreground)] text-[var(--foreground)]'
-          : 'border-[var(--border)] text-[var(--muted)]'
+          ? 'border-emerald-500/60 text-emerald-400'
+          : 'border-amber-500/50 text-amber-400/90'
       }`}
     >
-      {active ? 'Active' : 'Pending'}
+      {active ? 'Active' : 'Incomplete'}
     </span>
   );
 }
@@ -555,73 +530,76 @@ function AllChainsView({
 }) {
   const suiClient = useSuiClient();
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<FriendlyError | null>(null);
   const [rows, setRows] = useState<ChainRow[]>([]);
-  const [sources, setSources] = useState<{ ecdsa?: string; eddsa?: string }>({});
+  const [targets, setTargets] = useState<BalanceTarget[]>([]);
+  const [sources, setSources] = useState<{ ecdsa?: string; eddsa?: string; schnorrkel?: string }>({});
+  /** Chains whose balance changed from a realtime on-chain event, for the "live" highlight. */
+  const [justUpdated, setJustUpdated] = useState<Set<string>>(new Set());
+
+  /**
+   * Balances come from the shared store, not from this component.
+   *
+   * It owns caching, request coalescing, per-host rate limiting and the 30-second poll, so this view
+   * simply declares which chains it cares about. The previous version drove its own fetches and its own
+   * refresh timer, which is how a single new block could kick off a full 14-chain sweep before the last
+   * one had finished.
+   */
+  const { balances, busy, updatedAt, refresh } = useBalances(targets);
+  const age = useAgeLabel(updatedAt);
 
   const load = useCallback(async () => {
     if (!account) return;
     setLoading(true);
     setError(null);
     try {
-      const [{ getDWalletAddresses }, { fetchAllBalances }, { fetchTokenMarkets }] =
-        await Promise.all([
-          import('@/lib/ika/walletDetail'),
-          import('@/lib/utils/fetchBalances'),
-          import('@/lib/utils/prices'),
-        ]);
+      const [{ getDWalletAddresses }, { fetchTokenMarkets }] = await Promise.all([
+        import('@/lib/ika/walletDetail'),
+        import('@/lib/utils/prices'),
+      ]);
 
       // Newest Active wallet of each curve (listDWallets is already newest-first).
       const wallets = await listDWallets(suiClient, account.address);
       const ecdsa = wallets.find((w) => w.curve === 'ECDSA' && w.state === 'Active');
       const eddsa = wallets.find((w) => w.curve === 'EdDSA' && w.state === 'Active');
-      setSources({ ecdsa: ecdsa?.id, eddsa: eddsa?.id });
+      const schnorrkel = wallets.find((w) => w.curve === 'Schnorrkel' && w.state === 'Active');
+      setSources({ ecdsa: ecdsa?.id, eddsa: eddsa?.id, schnorrkel: schnorrkel?.id });
 
       const markets = await fetchTokenMarkets();
       const addrMap: Record<string, string> = {};
       const srcMap: Record<string, { id: string; capId: string }> = {};
-      // (chain, addresses, curveNumber) per wallet, for the balance pass below.
-      const balanceJobs: { addresses: Record<string, string>; curveNumber: number }[] = [];
+      const nextTargets: BalanceTarget[] = [];
 
-      for (const w of [ecdsa, eddsa]) {
+      // All three curves — omitting Schnorrkel here silently dropped Polkadot's native address.
+      for (const w of [ecdsa, eddsa, schnorrkel]) {
         if (!w) continue;
         const { addresses, curveNumber } = await getDWalletAddresses(suiClient, w.id);
         Object.assign(addrMap, addresses);
-        for (const chain of Object.keys(addresses)) srcMap[chain] = { id: w.id, capId: w.capId };
-        balanceJobs.push({ addresses, curveNumber });
+        for (const [chain, address] of Object.entries(addresses)) {
+          srcMap[chain] = { id: w.id, capId: w.capId };
+          nextTargets.push({ chain, address, curve: curveNumber });
+        }
       }
 
-      // Phase 1: show rows immediately (addresses + logos), balances pending.
-      const baseRows: ChainRow[] = CHAIN_ORDER.filter((c) => addrMap[c]).map((chain) => {
-        const src = srcMap[chain] || { id: '', capId: '' };
-        return {
-          chain,
-          symbol: CHAIN_SYMBOLS[chain] || chain,
-          address: addrMap[chain],
-          balance: '…',
-          usd: 0,
-          logo: markets[chain]?.logo ?? '',
-          dwalletId: src.id,
-          dwalletCapId: src.capId,
-        };
-      });
-      setRows(baseRows);
-      setLoading(false);
-
-      // Phase 2: fetch balances per wallet and merge in as they resolve.
-      const balMap: Record<string, { balance: string; usdValue: number }> = {};
-      for (const job of balanceJobs) {
-        Object.assign(balMap, await fetchAllBalances(job.addresses, job.curveNumber));
-      }
-      setRows((prev) =>
-        prev.map((r) => {
-          const b = balMap[r.chain] || { balance: '0', usdValue: 0 };
-          return { ...r, balance: b.balance, usd: b.usdValue };
+      setRows(
+        CHAIN_ORDER.filter((c) => addrMap[c]).map((chain) => {
+          const src = srcMap[chain] || { id: '', capId: '' };
+          return {
+            chain,
+            symbol: CHAIN_SYMBOLS[chain] || chain,
+            address: addrMap[chain],
+            logo: markets[chain]?.logo ?? '',
+            dwalletId: src.id,
+            dwalletCapId: src.capId,
+          };
         })
       );
-    } catch (e: any) {
+      // Registering the targets is what starts polling; the store fetches them itself.
+      setTargets(nextTargets.filter((t) => CHAIN_ORDER.includes(t.chain)));
+      setLoading(false);
+    } catch (e) {
       console.error(e);
-      setError(e?.message || 'Failed to load chains');
+      setError(friendlyError(e));
       setLoading(false);
     }
   }, [account, suiClient]);
@@ -630,32 +608,89 @@ function AllChainsView({
     load();
   }, [load]);
 
-  const total = rows.reduce((s, r) => s + r.usd, 0);
+  /**
+   * Realtime deposit detection: Solana account writes, EVM new blocks, Bitcoin address tracking.
+   *
+   * An event only asks the store to refetch that one chain; the store's rate limiter and coalescing decide
+   * what actually reaches the network, so a burst of blocks can no longer turn into a burst of requests.
+   */
+  const watchKey = targets.map((t) => `${t.chain}:${t.address}`).join('|');
+  useEffect(() => {
+    if (targets.length === 0) return;
+    let cancelled = false;
+    let stop: (() => void) | undefined;
+
+    (async () => {
+      const [{ watchDeposits }, { refreshSoon }] = await Promise.all([
+        import('@/lib/utils/depositWatcher'),
+        import('@/lib/balances/store'),
+      ]);
+      if (cancelled) return;
+      stop = watchDeposits({
+        targets: targets.map((t) => ({ chain: t.chain, address: t.address })),
+        onActivity: (chain) => {
+          refreshSoon(chain);
+          setJustUpdated((prev) => new Set(prev).add(chain));
+          setTimeout(
+            () =>
+              setJustUpdated((prev) => {
+                const next = new Set(prev);
+                next.delete(chain);
+                return next;
+              }),
+            4_000
+          );
+        },
+      });
+    })();
+
+    return () => {
+      cancelled = true;
+      stop?.();
+    };
+    // Re-subscribe only when the set of watched addresses actually changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [watchKey]);
+
+  const total = rows.reduce((sum, r) => sum + (balances[r.chain]?.usdValue ?? 0), 0);
+  const priced = rows.filter((r) => balances[r.chain]?.at);
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
           <h1 className="text-2xl font-extrabold tracking-tight">All chains</h1>
-          <div className="mono-label mt-1">across your ECDSA + EdDSA dWallets</div>
+          <div className="mono-label mt-1">
+            {rows.length} chains · updated {age}
+          </div>
         </div>
-        <div className="text-right">
-          <div className="mono-label">Total</div>
-          <div className="text-xl font-extrabold">${fmtUsd(total)}</div>
+        <div className="flex items-center gap-3 shrink-0">
+          <div className="text-right">
+            <div className="mono-label">Total</div>
+            <div className="text-xl font-extrabold num">
+              {priced.length === 0 && loading ? <Skeleton className="h-5 w-20" /> : `$${fmtUsd(total)}`}
+            </div>
+          </div>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => void refresh()}
+            loading={busy}
+            icon={!busy ? <RefreshCw className="w-3.5 h-3.5" aria-hidden /> : undefined}
+            title={`Refresh now — balances also refresh every ${REFRESH_SECONDS}s`}
+          >
+            Refresh
+          </Button>
         </div>
       </div>
 
       {loading && (
         <div className="card p-8 flex items-center justify-center gap-3 text-sm text-[var(--muted)]">
-          <Loader2 className="w-4 h-4 animate-spin" /> Gathering addresses, balances &amp; prices…
+          <Loader2 className="w-4 h-4 animate-spin" aria-hidden /> Finding your dWallets and addresses…
         </div>
       )}
 
-      {error && (
-        <div className="card p-3 border-[var(--border)]">
-          <p className="text-xs break-words">{error}</p>
-        </div>
-      )}
+      {error && <ErrorNote {...error} />}
 
       {!loading && (
         <>
@@ -664,13 +699,22 @@ function AllChainsView({
             <MissingCurveNote label="No active ECDSA wallet — create one to add Bitcoin + EVM chains." onCreate={onCreate} />
           )}
           {!sources.eddsa && (
-            <MissingCurveNote label="No active EdDSA wallet — create one to add Solana, Polkadot, Cardano & NEAR." onCreate={onCreate} />
+            <MissingCurveNote label="No active EdDSA wallet — create one to add Solana, Cardano & NEAR." onCreate={onCreate} />
+          )}
+          {!sources.schnorrkel && (
+            <MissingCurveNote label="No active Schnorrkel wallet — create one to add Polkadot." onCreate={onCreate} />
           )}
 
           {rows.length > 0 && (
             <div className="grid sm:grid-cols-2 gap-3">
               {rows.map((r) => (
-                <ChainRowCard key={r.chain} row={r} zkAddress={account?.address ?? ''} />
+                <ChainRowCard
+                  key={r.chain}
+                  row={r}
+                  balance={balances[r.chain]}
+                  zkAddress={account?.address ?? ''}
+                  live={justUpdated.has(r.chain)}
+                />
               ))}
             </div>
           )}
@@ -684,24 +728,25 @@ function MissingCurveNote({ label, onCreate }: { label: string; onCreate: () => 
   return (
     <div className="card p-3 flex items-center justify-between gap-3">
       <p className="text-xs text-[var(--muted)]">{label}</p>
-      <button
-        onClick={onCreate}
-        className="shrink-0 px-3 py-1.5 rounded-[8px] bg-[var(--foreground)] text-black font-semibold text-xs hover:brightness-90 transition"
-      >
+      <Button size="sm" onClick={onCreate}>
         Create
-      </button>
+      </Button>
     </div>
   );
 }
 
 /* --------------------------- Wallet detail --------------------------- */
 
+/**
+ * A chain row's static facts.
+ *
+ * Balances deliberately are NOT here: they live in the shared balance store, so two views showing the same
+ * chain read one cached value instead of each fetching their own.
+ */
 interface ChainRow {
   chain: string;
   symbol: string;
   address: string;
-  balance: string;
-  usd: number;
   logo: string;
   /** Which dWallet this chain belongs to (for sending). */
   dwalletId: string;
@@ -719,9 +764,13 @@ function WalletDetail({
 }) {
   const suiClient = useSuiClient();
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<FriendlyError | null>(null);
   const [rows, setRows] = useState<ChainRow[]>([]);
+  const [targets, setTargets] = useState<BalanceTarget[]>([]);
   const [active, setActive] = useState(true);
+
+  const { balances, busy, updatedAt, refresh } = useBalances(targets);
+  const age = useAgeLabel(updatedAt);
 
   useEffect(() => {
     let cancelled = false;
@@ -730,12 +779,10 @@ function WalletDetail({
       setError(null);
       try {
         // Lazy-load the heavy crypto/RPC modules on the client only (keeps them out of SSR/prerender).
-        const [{ getDWalletAddresses }, { fetchAllBalances }, { fetchTokenMarkets }] =
-          await Promise.all([
-            import('@/lib/ika/walletDetail'),
-            import('@/lib/utils/fetchBalances'),
-            import('@/lib/utils/prices'),
-          ]);
+        const [{ getDWalletAddresses }, { fetchTokenMarkets }] = await Promise.all([
+          import('@/lib/ika/walletDetail'),
+          import('@/lib/utils/prices'),
+        ]);
         const { addresses, curveNumber, active: isActive } = await getDWalletAddresses(
           suiClient,
           wallet.id
@@ -747,35 +794,27 @@ function WalletDetail({
           }
           return;
         }
-        // Phase 1: show rows immediately (addresses + logos + prices) — fast.
         const markets = await fetchTokenMarkets();
-        const baseRows: ChainRow[] = Object.entries(addresses).map(([chain, address]) => ({
-          chain,
-          symbol: CHAIN_SYMBOLS[chain] || chain,
-          address,
-          balance: '…',
-          usd: 0,
-          logo: markets[chain]?.logo ?? '',
-          dwalletId: wallet.id,
-          dwalletCapId: wallet.capId,
-        }));
         if (cancelled) return;
-        setRows(baseRows);
-        setLoading(false);
 
-        // Phase 2: fill balances as they resolve (slow chains no longer block the view).
-        const balances = await fetchAllBalances(addresses, curveNumber);
-        if (cancelled) return;
-        setRows((prev) =>
-          prev.map((r) => {
-            const b = balances[r.chain] || { balance: '0', usdValue: 0 };
-            return { ...r, balance: b.balance, usd: b.usdValue };
-          })
+        setRows(
+          Object.entries(addresses).map(([chain, address]) => ({
+            chain,
+            symbol: CHAIN_SYMBOLS[chain] || chain,
+            address,
+            logo: markets[chain]?.logo ?? '',
+            dwalletId: wallet.id,
+            dwalletCapId: wallet.capId,
+          }))
         );
-      } catch (e: any) {
+        setTargets(
+          Object.entries(addresses).map(([chain, address]) => ({ chain, address, curve: curveNumber }))
+        );
+        setLoading(false);
+      } catch (e) {
         console.error(e);
         if (!cancelled) {
-          setError(e?.message || 'Failed to load wallet');
+          setError(friendlyError(e));
           setLoading(false);
         }
       }
@@ -783,9 +822,9 @@ function WalletDetail({
     return () => {
       cancelled = true;
     };
-  }, [wallet.id, suiClient]);
+  }, [wallet.id, wallet.capId, suiClient]);
 
-  const total = rows.reduce((s, r) => s + r.usd, 0);
+  const total = rows.reduce((sum, r) => sum + (balances[r.chain]?.usdValue ?? 0), 0);
 
   return (
     <div className="space-y-4">
@@ -797,23 +836,40 @@ function WalletDetail({
       </button>
 
       <div className="card p-5">
-        <div className="flex items-center justify-between gap-3 mb-4">
-          <div>
+        <div className="flex items-start justify-between gap-3 mb-4">
+          <div className="min-w-0">
             <div className="flex items-center gap-2">
               <span className="font-bold">{wallet.curve}</span>
               <StateBadge state={wallet.state} />
             </div>
-            <code className="text-xs text-[var(--muted)] break-all">{wallet.id}</code>
+            <code className="text-xs text-[var(--muted)]" title={wallet.id}>
+              {truncate(wallet.id, 14, 10)}
+            </code>
+            {!loading && active && <div className="mono-label mt-1">updated {age}</div>}
           </div>
-          <div className="text-right shrink-0">
-            <div className="mono-label">Total</div>
-            <div className="text-xl font-extrabold">${fmtUsd(total)}</div>
+          <div className="flex items-center gap-3 shrink-0">
+            <div className="text-right">
+              <div className="mono-label">Total</div>
+              <div className="text-xl font-extrabold num">${fmtUsd(total)}</div>
+            </div>
+            {active && !loading && (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => void refresh()}
+                loading={busy}
+                icon={!busy ? <RefreshCw className="w-3.5 h-3.5" aria-hidden /> : undefined}
+                title={`Refresh now — balances also refresh every ${REFRESH_SECONDS}s`}
+              >
+                Refresh
+              </Button>
+            )}
           </div>
         </div>
 
         {loading && (
           <div className="py-8 flex items-center justify-center gap-3 text-sm text-[var(--muted)]">
-            <Loader2 className="w-4 h-4 animate-spin" /> Loading addresses, balances &amp; prices…
+            <Loader2 className="w-4 h-4 animate-spin" aria-hidden /> Deriving addresses…
           </div>
         )}
 
@@ -823,12 +879,21 @@ function WalletDetail({
           </p>
         )}
 
-        {error && <p className="py-4 text-center text-sm break-words">{error}</p>}
+        {error && (
+          <div className="py-3">
+            <ErrorNote {...error} />
+          </div>
+        )}
 
         {!loading && active && (
           <div className="space-y-2">
             {rows.map((r) => (
-              <ChainRowCard key={r.chain} row={r} zkAddress={account?.address ?? ''} />
+              <ChainRowCard
+                key={r.chain}
+                row={r}
+                balance={balances[r.chain]}
+                zkAddress={account?.address ?? ''}
+              />
             ))}
           </div>
         )}
@@ -837,11 +902,28 @@ function WalletDetail({
   );
 }
 
-function ChainRowCard({ row, zkAddress }: { row: ChainRow; zkAddress: string }) {
+function ChainRowCard({
+  row,
+  balance,
+  zkAddress,
+  live = false,
+}: {
+  row: ChainRow;
+  /** From the shared balance store; undefined until first fetched. */
+  balance?: BalanceEntry;
+  zkAddress: string;
+  /** True briefly after a realtime deposit event refreshed this chain's balance. */
+  live?: boolean;
+}) {
   const [sendOpen, setSendOpen] = useState(false);
-  const [copied, setCopied] = useState(false);
   return (
-    <div className="rounded-[12px] border border-[var(--border)] p-3.5">
+    <div
+      className={`rounded-[12px] border p-3.5 transition-colors duration-500 ${
+        live
+          ? 'border-emerald-500/60 bg-emerald-500/[0.04]'
+          : 'border-[var(--border)]'
+      }`}
+    >
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-3 min-w-0">
           {row.logo ? (
@@ -853,46 +935,57 @@ function ChainRowCard({ row, zkAddress }: { row: ChainRow; zkAddress: string }) 
             </div>
           )}
           <div className="min-w-0">
-            <div className="font-semibold text-sm">{row.chain}</div>
+            <div className="font-semibold text-sm flex items-center gap-1.5">
+              {row.chain}
+              {live && (
+                <span
+                  className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500"
+                  title="Balance just updated from a realtime on-chain event"
+                />
+              )}
+            </div>
             <div className="mono-label">{row.symbol}</div>
           </div>
         </div>
         <div className="text-right shrink-0">
-          <div className="text-sm font-semibold tabular-nums">
-            {row.balance} {row.symbol}
-          </div>
-          <div className="mono-label">${fmtUsd(row.usd)}</div>
+          {!balance?.at ? (
+            <div className="space-y-1.5 py-0.5">
+              <Skeleton className="h-3.5 w-20" />
+              <Skeleton className="h-2.5 w-12" />
+            </div>
+          ) : (
+            <>
+              <div className="text-sm font-semibold num">
+                {balance.balance} {row.symbol}
+              </div>
+              <div className="mono-label num flex items-center justify-end gap-1">
+                {/* A failed read keeps the last known value rather than showing zero, so it has to say
+                    so — a silently stale balance is worse than a visibly stale one. */}
+                {balance.error && (
+                  <span title={`Could not refresh: ${balance.error}`} className="text-[var(--warning)]">
+                    stale
+                  </span>
+                )}
+                ${fmtUsd(balance.usdValue)}
+              </div>
+            </>
+          )}
         </div>
       </div>
 
-      {/* Receive (copy address) + Send */}
-      <div className="mt-3 flex items-center gap-2">
-        <button
-          onClick={() => {
-            navigator.clipboard.writeText(row.address);
-            setCopied(true);
-            setTimeout(() => setCopied(false), 1500);
-          }}
-          className="flex-1 min-w-0 flex items-center gap-2 px-3 py-2 rounded-[8px] bg-[var(--surface-2)] border border-[var(--border)] hover:border-[var(--foreground)]/40 transition group"
-          title="Copy address to receive"
-        >
-          <span className="mono-label shrink-0">Receive</span>
-          <code className="text-xs break-all text-left flex-1 text-[var(--foreground)]/90">
-            {row.address}
-          </code>
-          {copied ? (
-            <Check className="w-3.5 h-3.5 shrink-0" />
-          ) : (
-            <Copy className="w-3.5 h-3.5 text-[var(--muted)] shrink-0 group-hover:text-[var(--foreground)]" />
-          )}
-        </button>
-        <button
+      {/* Receive (copy the address, or open it on an explorer) + Send */}
+      <div className="mt-3 flex items-end gap-2">
+        <div className="flex-1 min-w-0">
+          <CopyField label="Receive" value={row.address} href={addressUrl(row.chain, row.address)} />
+        </div>
+        <Button
+          size="md"
           onClick={() => setSendOpen(true)}
           disabled={!zkAddress}
-          className="shrink-0 px-4 py-2 rounded-[8px] bg-[var(--foreground)] text-black font-semibold text-xs hover:brightness-90 transition disabled:opacity-40"
+          title={zkAddress ? `Send ${row.symbol}` : 'Sign in to send'}
         >
           Send
-        </button>
+        </Button>
       </div>
 
       <SendModal
@@ -901,37 +994,15 @@ function ChainRowCard({ row, zkAddress }: { row: ChainRow; zkAddress: string }) 
         chain={row.chain}
         symbol={row.symbol}
         fromAddress={row.address}
-        balance={row.balance}
+        balance={balance?.balance ?? '0'}
         dwalletId={row.dwalletId}
         dwalletCapId={row.dwalletCapId}
         zkAddress={zkAddress}
+        onSent={() => {
+          void import('@/lib/balances/store').then((m) => m.refreshSoon(row.chain));
+        }}
       />
     </div>
   );
 }
 
-/* ------------------------------ bits ------------------------------ */
-
-function Field({ label, value }: { label: string; value: string }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <div className="mb-3">
-      <div className="mono-label mb-1">{label}</div>
-      <button
-        onClick={() => {
-          navigator.clipboard.writeText(value);
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1500);
-        }}
-        className="w-full flex items-center gap-2 px-3 py-2.5 rounded-[10px] bg-[var(--surface-2)] border border-[var(--border)] hover:border-[var(--foreground)]/50 transition group"
-      >
-        <code className="text-xs break-all text-left flex-1 text-[var(--foreground)]/90">{value}</code>
-        {copied ? (
-          <Check className="w-3.5 h-3.5 shrink-0" />
-        ) : (
-          <Copy className="w-3.5 h-3.5 text-[var(--muted)] shrink-0 group-hover:text-[var(--foreground)]" />
-        )}
-      </button>
-    </div>
-  );
-}

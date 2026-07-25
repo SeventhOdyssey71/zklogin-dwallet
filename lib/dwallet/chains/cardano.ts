@@ -11,10 +11,10 @@
  */
 
 import { ChainSigner, UnsignedTransaction, SignedTransactionResult } from '../core/types';
-import { CARDANO_TESTNET } from '../../config/chains';
+import { CARDANO_MAINNET } from '../../config/chains';
 
 /**
- * Cardano chain signer for Preview testnet
+ * Cardano chain signer for mainnet
  */
 export class CardanoSigner implements ChainSigner {
   /**
@@ -178,7 +178,7 @@ export class CardanoSigner implements ChainSigner {
     unsignedTx: any,
     signature: Uint8Array
   ): Promise<SignedTransactionResult> {
-    console.log('📡 Broadcasting transaction to Cardano Preview testnet...');
+    console.log('📡 Broadcasting transaction to Cardano mainnet...');
 
     try {
       const { txBody, fromAddress, publicKey, CardanoWasm } = unsignedTx;

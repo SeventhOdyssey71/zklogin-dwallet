@@ -4,13 +4,14 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
+import { CARDANO_MAINNET } from '@/lib/config/chains';
 
 export async function GET(request: NextRequest) {
   try {
     // Fetch protocol parameters from Koios API (latest epoch)
     // Koios uses POST with empty body for latest epoch params
     const response = await fetch(
-      `https://preview.koios.rest/api/v1/epoch_params`,
+      `${CARDANO_MAINNET.rpcUrl}/epoch_params`,
       {
         method: 'GET',
         headers: {

@@ -2,8 +2,9 @@
  * IkaClient initialization utilities
  */
 
-import { SuiClient } from '@mysten/sui/client';
-import { IkaClient, UserShareEncryptionKeys, Curve, getNetworkConfig } from '@ika.xyz/sdk';
+import { Curve } from '@ika.xyz/sdk';
+import type { AppSuiClient } from '@/lib/sui/client';
+import { getIkaClient } from '@/lib/ika/ikaClient';
 import { SigningContext } from './types';
 import { generateEncryptionKeys } from './encryption';
 
@@ -16,23 +17,19 @@ import { generateEncryptionKeys } from './encryption';
  * @returns Initialized signing context with IkaClient and encryption keys
  */
 export async function initializeClientSideSigning(
-  suiClient: SuiClient,
+  suiClient: AppSuiClient,
   encryptionSeed: Uint8Array,
-  curve: Curve
+  curve: Curve,
+  suiAddress: string
 ): Promise<SigningContext> {
   console.log('🔧 Initializing client-side signing...');
 
-  // Initialize IkaClient
-  const ikaClient = new IkaClient({
-    suiClient,
-    config: getNetworkConfig('testnet'),
-    cache: true,
-  });
-  await ikaClient.initialize();
-  console.log('✅ IkaClient initialized');
+  // Shared, already-initialized client — constructing one per call cost a measured ~1.5s and threw
+  // away its caches each time.
+  const ikaClient = await getIkaClient(suiClient);
 
   // Generate user share encryption keys from seed
-  const userShareEncryptionKeys = await generateEncryptionKeys(encryptionSeed, curve);
+  const userShareEncryptionKeys = await generateEncryptionKeys(encryptionSeed, curve, suiAddress);
 
   return { ikaClient, userShareEncryptionKeys };
 }

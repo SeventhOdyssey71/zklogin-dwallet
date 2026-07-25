@@ -4,6 +4,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
+import { CARDANO_MAINNET } from '@/lib/config/chains';
 
 export async function POST(request: NextRequest) {
   try {
@@ -26,7 +27,7 @@ export async function POST(request: NextRequest) {
     console.log(`📋 TX hex (first 100 chars): ${tx.substring(0, 100)}`);
 
     const response = await fetch(
-      `https://preview.koios.rest/api/v1/submittx`,
+      `${CARDANO_MAINNET.rpcUrl}/submittx`,
       {
         method: 'POST',
         headers: {

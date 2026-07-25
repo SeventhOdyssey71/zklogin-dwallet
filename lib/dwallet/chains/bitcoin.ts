@@ -1,416 +1,545 @@
 /**
- * Bitcoin chain signing implementation
+ * Bitcoin chain signing — Taproot (P2TR / BIP341), the SDK's intended Bitcoin path.
+ *
+ * WHY TAPROOT
+ * -----------
+ * The Ika SDK names its signature algorithms after their use: `Taproot` is documented as
+ * "Taproot (Bitcoin)". It is BIP340 Schnorr on secp256k1 — which is precisely what 2PC-MPC v4
+ * ("fast Schnorr") accelerates, and per the SDK, Schnorr/Taproot **always** uses
+ * `requestGlobalPresign`, i.e. the v4 presignature pool with its single ~400ms online round. The
+ * old legacy-ECDSA path was the slow one.
+ *
+ * HOW IKA'S TAPROOT SIGNING BEHAVES (from the SDK's own integration tests)
+ * -----------------------------------------------------------------------
+ * `all-combinations.test.ts` verifies a Taproot signature as:
+ *
+ *     schnorr.verify(signature, computeHash(message), publicKey.slice(1))
+ *
+ * Three facts fall out of that, and the whole implementation follows from them:
+ *
+ *   1. The signature is a bare 64-byte BIP340 Schnorr signature. No recovery id, no DER, and for
+ *      SIGHASH_DEFAULT no trailing sighash byte.
+ *   2. It verifies against the **x-only** public key — the 33-byte compressed key minus its parity
+ *      prefix (`.slice(1)`).
+ *   3. Ika signs `SHA256(message)`, where `message` is what we hand it. It applies **no BIP341 key
+ *      tweak**, and there is no tweak function anywhere in the SDK or ika-wasm.
+ *
+ * CONSEQUENCE 1 — the output key is the UNTWEAKED key.
+ * BIP341 normally sets the output key to Q = P + H_TapTweak(P)·G. Spending that key-path requires
+ * signing with (p + t), which Ika cannot do since it can't tweak its secret share. So we use the
+ * dWallet's x-only key directly as the taproot output key. Consensus only checks
+ * `schnorr_verify(Q, sighash, sig)` against whatever 32 bytes sit in the scriptPubKey — it does not
+ * care how Q was derived — so this is valid and, crucially, spendable. There is no script tree, so
+ * there is no key-path/script-path ambiguity to worry about.
+ *
+ * CONSEQUENCE 2 — how we get BIP341's sighash out of a plain SHA256.
+ * The real sighash is `taggedHash("TapSighash", 0x00 || SigMsg)`, and a BIP340 tagged hash is just
+ *     taggedHash(tag, m) = SHA256( SHA256(tag) || SHA256(tag) || m )
+ * Since Ika gives us exactly one SHA256, we hand it
+ *     message = SHA256("TapSighash") || SHA256("TapSighash") || 0x00 || SigMsg
+ * and its single SHA256 emits the exact BIP341 sighash. No protocol changes, no second hash.
+ *
+ * SAFETY NET
+ * ----------
+ * The SigMsg preimage is assembled here by hand (it has to be — we need the pre-tag bytes, and
+ * libraries only expose the finished hash). So on every signing operation we also compute the
+ * authoritative sighash with the audited `@scure/btc-signer` and assert the two agree before
+ * anything is signed or broadcast. A mismatch throws instead of burning a real UTXO.
  */
 
+import { Transaction } from '@scure/btc-signer';
+import { sha256 } from '@noble/hashes/sha2.js';
+import { schnorr } from '@noble/curves/secp256k1.js';
+import { bech32, bech32m } from 'bech32';
 import { ChainSigner, UnsignedTransaction, SignedTransactionResult } from '../core/types';
-import { ethers } from 'ethers';
+import { MAINNET_CHAINS } from '../../config/chains';
 
-/**
- * Bitcoin UTXO structure
- */
+/** Blockstream UTXO shape. */
 interface UTXO {
   txid: string;
   vout: number;
   value: number;
-  status: {
-    confirmed: boolean;
-    block_height?: number;
-  };
+  status: { confirmed: boolean; block_height?: number };
+}
+
+/** Taproot outputs below this are unspendable dust and rejected by relays. */
+const P2TR_DUST_SATS = 330;
+
+/**
+ * Exact virtual size of a 1-input P2TR key-path spend with the given output scripts.
+ *
+ * Computed rather than estimated: a fixed guess either underpays (slow or stuck) or overpays, and
+ * the real number is fully determined here because we control the input count and know every output
+ * script length up front.
+ *
+ *   base   = nVersion(4) + txinCount(1) + txin(41) + txoutCount(1) + Σ(value 8 + len 1 + script) + locktime(4)
+ *   total  = base + segwit marker&flag(2) + witness(1 item + 1 len + 64 sig = 66)
+ *   weight = base*3 + total,   vsize = ceil(weight / 4)
+ */
+function p2trSpendVsize(outputScriptLengths: number[]): number {
+  const base =
+    4 + 1 + 41 + 1 + outputScriptLengths.reduce((n, len) => n + 9 + len, 0) + 4;
+  const total = base + 2 + 66;
+  return Math.ceil((base * 3 + total) / 4);
+}
+
+const TAP_SIGHASH_TAG = sha256(new TextEncoder().encode('TapSighash'));
+
+const concat = (...parts: Uint8Array[]): Uint8Array => {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let off = 0;
+  for (const p of parts) {
+    out.set(p, off);
+    off += p.length;
+  }
+  return out;
+};
+
+const u32le = (n: number): Uint8Array => {
+  const b = new Uint8Array(4);
+  new DataView(b.buffer).setUint32(0, n, true);
+  return b;
+};
+
+const u64le = (n: bigint): Uint8Array => {
+  const b = new Uint8Array(8);
+  new DataView(b.buffer).setBigUint64(0, n, true);
+  return b;
+};
+
+const hexToBytes = (hex: string): Uint8Array => {
+  const h = hex.startsWith('0x') ? hex.slice(2) : hex;
+  const out = new Uint8Array(h.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(h.substr(i * 2, 2), 16);
+  return out;
+};
+
+const bytesToHex = (b: Uint8Array): string =>
+  Array.from(b)
+    .map((x) => x.toString(16).padStart(2, '0'))
+    .join('');
+
+/**
+ * dWallet public key → 32-byte x-only key.
+ *
+ * Ika hands back a 33-byte compressed secp256k1 key; Taproot verification uses `publicKey.slice(1)`
+ * (drop the 0x02/0x03 parity prefix). 64/65-byte uncompressed forms are also tolerated.
+ */
+export function xOnlyPublicKey(publicKey: string): Uint8Array {
+  const bytes = hexToBytes(publicKey);
+  if (bytes.length === 33) return bytes.slice(1);
+  if (bytes.length === 32) return bytes;
+  if (bytes.length === 65) return bytes.slice(1, 33);
+  if (bytes.length === 64) return bytes.slice(0, 32);
+  throw new Error(`Unexpected secp256k1 public key length: ${bytes.length} bytes`);
+}
+
+/** x-only key → P2TR scriptPubKey (`OP_1 PUSH32 <Q>`). */
+export function p2trScript(xOnly: Uint8Array): Uint8Array {
+  if (xOnly.length !== 32) throw new Error('P2TR output key must be 32 bytes');
+  return concat(new Uint8Array([0x51, 0x20]), xOnly);
+}
+
+/** x-only key → mainnet bech32m address (`bc1p…`). */
+export function p2trAddress(xOnly: Uint8Array): string {
+  return bech32m.encode('bc', [1, ...bech32m.toWords(xOnly)], 200);
+}
+
+/** Decode any supported Bitcoin mainnet address to its scriptPubKey. */
+function addressToScript(address: string): Uint8Array {
+  // bech32 / bech32m (segwit v0 and v1+). BIP350: v0 uses bech32, v1+ uses bech32m — the two
+  // checksums are deliberately incompatible, so the version dictates the decoder.
+  if (address.startsWith('bc1')) {
+    const decoded = address.startsWith('bc1p')
+      ? bech32m.decode(address, 200)
+      : bech32.decode(address, 200);
+    const version = decoded.words[0];
+    const program = new Uint8Array(bech32m.fromWords(decoded.words.slice(1)));
+    if (version === 0) {
+      if (program.length !== 20 && program.length !== 32) {
+        throw new Error('Invalid segwit v0 program length');
+      }
+      return concat(new Uint8Array([0x00, program.length]), program);
+    }
+    if (version === 1 && program.length !== 32) {
+      throw new Error('Invalid taproot program length');
+    }
+    return concat(new Uint8Array([0x50 + version, program.length]), program);
+  }
+
+  // base58check: P2PKH ('1…') and P2SH ('3…')
+  const ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+  let num = 0n;
+  for (const ch of address) {
+    const idx = ALPHABET.indexOf(ch);
+    if (idx < 0) throw new Error(`Invalid Bitcoin address: ${address}`);
+    num = num * 58n + BigInt(idx);
+  }
+  let hex = num.toString(16);
+  if (hex.length % 2) hex = '0' + hex;
+  let bytes = hexToBytes(hex);
+  // restore leading zero bytes eaten by base58
+  for (const ch of address) {
+    if (ch !== '1') break;
+    bytes = concat(new Uint8Array([0]), bytes);
+  }
+  const payload = bytes.slice(0, bytes.length - 4);
+  const checksum = bytes.slice(bytes.length - 4);
+  const expected = sha256(sha256(payload)).slice(0, 4);
+  if (bytesToHex(checksum) !== bytesToHex(expected)) {
+    throw new Error(`Bad address checksum: ${address}`);
+  }
+  const hash160 = payload.slice(1);
+  if (payload[0] === 0x00) {
+    // OP_DUP OP_HASH160 PUSH20 <h> OP_EQUALVERIFY OP_CHECKSIG
+    return concat(new Uint8Array([0x76, 0xa9, 0x14]), hash160, new Uint8Array([0x88, 0xac]));
+  }
+  if (payload[0] === 0x05) {
+    // OP_HASH160 PUSH20 <h> OP_EQUAL
+    return concat(new Uint8Array([0xa9, 0x14]), hash160, new Uint8Array([0x87]));
+  }
+  throw new Error(`Unsupported address version byte 0x${payload[0].toString(16)}`);
 }
 
 /**
- * Bitcoin chain signer
+ * Build the BIP341 SigMsg preimage for a key-path spend with SIGHASH_DEFAULT, prefixed with the
+ * two TapSighash tag digests so that a single SHA256 over the result equals the real sighash.
+ *
+ * Single-input only (see the selection note in buildUnsignedTransaction) — with one input,
+ * sha_prevouts/amounts/scriptpubkeys/sequences each cover exactly that input.
  */
+function taprootSighashPreimage(params: {
+  version: number;
+  lockTime: number;
+  prevTxid: Uint8Array; // internal byte order (little-endian, as serialized)
+  prevVout: number;
+  prevAmount: bigint;
+  prevScript: Uint8Array;
+  sequence: number;
+  outputs: { script: Uint8Array; amount: bigint }[];
+  inputIndex: number;
+}): Uint8Array {
+  const {
+    version,
+    lockTime,
+    prevTxid,
+    prevVout,
+    prevAmount,
+    prevScript,
+    sequence,
+    outputs,
+    inputIndex,
+  } = params;
+
+  const shaPrevouts = sha256(concat(prevTxid, u32le(prevVout)));
+  const shaAmounts = sha256(u64le(prevAmount));
+  const shaScriptPubKeys = sha256(
+    concat(new Uint8Array([prevScript.length]), prevScript) // varint length (always < 0xfd here)
+  );
+  const shaSequences = sha256(u32le(sequence));
+  const shaOutputs = sha256(
+    concat(
+      ...outputs.map((o) => concat(u64le(o.amount), new Uint8Array([o.script.length]), o.script))
+    )
+  );
+
+  const sigMsg = concat(
+    new Uint8Array([0x00]), // epoch (BIP341 hashes 0x00 || SigMsg)
+    new Uint8Array([0x00]), // hash_type = SIGHASH_DEFAULT
+    u32le(version),
+    u32le(lockTime),
+    shaPrevouts,
+    shaAmounts,
+    shaScriptPubKeys,
+    shaSequences,
+    shaOutputs,
+    new Uint8Array([0x00]), // spend_type: no annex, key path
+    u32le(inputIndex)
+  );
+
+  // Ika computes SHA256(message); tag||tag||sigMsg turns that into taggedHash("TapSighash", …).
+  return concat(TAP_SIGHASH_TAG, TAP_SIGHASH_TAG, sigMsg);
+}
+
+/** Bitcoin Taproot signer. */
 export class BitcoinSigner implements ChainSigner {
-  private rpcUrl = 'https://blockstream.info/testnet/api';
+  private rpcUrl = MAINNET_CHAINS.Bitcoin.rpcUrl;
 
   /**
-   * Build unsigned Bitcoin transaction
+   * Live fee rate in sat/vByte, targeting ~3-block confirmation.
+   *
+   * A flat rate always confirmed on testnet; on mainnet it either strands the transaction or
+   * overpays, so read Blockstream's estimates and fall back to a conservative floor.
+   */
+  private async getFeeRate(): Promise<number> {
+    const FALLBACK_SAT_PER_VBYTE = 5;
+    try {
+      const res = await fetch(`${this.rpcUrl}/fee-estimates`);
+      if (!res.ok) return FALLBACK_SAT_PER_VBYTE;
+      const estimates: Record<string, number> = await res.json();
+      const target = estimates['3'] ?? estimates['2'] ?? estimates['1'];
+      if (typeof target !== 'number' || !Number.isFinite(target) || target <= 0) {
+        return FALLBACK_SAT_PER_VBYTE;
+      }
+      return Math.max(1, Math.ceil(target)); // never below the 1 sat/vB relay minimum
+    } catch {
+      return FALLBACK_SAT_PER_VBYTE;
+    }
+  }
+
+  /**
+   * Build an unsigned P2TR spend.
+   *
+   * Speed notes — the old implementation did two things that dominated its latency:
+   *   • one extra `/tx/{txid}` request per UTXO purely to recover each prevout's scriptPubKey.
+   *     Unnecessary here: we only ever spend our *own* P2TR outputs, so every prevout script is
+   *     `p2trScript(ourKey)`, computable locally. Those N requests are gone.
+   *   • it fetched UTXOs and the fee rate sequentially; they are independent, so they now run
+   *     concurrently.
    */
   async buildUnsignedTransaction(
     recipient: string,
     amount: string,
-    fromAddress: string
+    fromAddress: string,
+    publicKey?: string
   ): Promise<UnsignedTransaction> {
-    console.log(`📝 Building unsigned Bitcoin transaction...`);
-    console.log(`💰 Sending ${amount} BTC`);
+    if (!publicKey) {
+      throw new Error('Bitcoin Taproot signing needs the dWallet public key to derive the prevout script');
+    }
+
+    const xOnly = xOnlyPublicKey(publicKey);
+    const ourScript = p2trScript(xOnly);
+    const derived = p2trAddress(xOnly);
+
+    if (derived !== fromAddress) {
+      throw new Error(
+        `Address mismatch: dWallet key derives ${derived} but the spend targets ${fromAddress}. ` +
+          `Refusing to build a transaction whose inputs it cannot sign.`
+      );
+    }
+
+    console.log('📝 Building unsigned Bitcoin Taproot (P2TR) transaction…');
     console.log(`📤 From: ${fromAddress}`);
-    console.log(`📥 To: ${recipient}`);
+    console.log(`📥 To:   ${recipient}`);
 
-    // Fetch UTXOs for the address
-    const utxosResponse = await fetch(`${this.rpcUrl}/address/${fromAddress}/utxo`);
-    if (!utxosResponse.ok) {
-      throw new Error(`Failed to fetch UTXOs: ${utxosResponse.status}`);
+    // Independent network reads — run them together.
+    const [utxosRes, feeRate] = await Promise.all([
+      fetch(`${this.rpcUrl}/address/${fromAddress}/utxo`),
+      this.getFeeRate(),
+    ]);
+    if (!utxosRes.ok) throw new Error(`Failed to fetch UTXOs: ${utxosRes.status}`);
+    const utxos: UTXO[] = await utxosRes.json();
+
+    const confirmed = utxos.filter((u) => u.status.confirmed);
+    if (confirmed.length === 0) {
+      throw new Error(
+        utxos.length > 0
+          ? 'All UTXOs are still unconfirmed — wait for a confirmation and retry.'
+          : 'No UTXOs available. This address has no funds.'
+      );
     }
 
-    const utxos: UTXO[] = await utxosResponse.json();
-    console.log(`📦 Found ${utxos.length} UTXOs`);
+    const amountSats = BigInt(Math.floor(parseFloat(amount) * 1e8));
+    if (amountSats <= 0n) throw new Error('Amount must be greater than zero');
+    console.log(`💰 Sending ${amount} BTC (${amountSats} sats) at ${feeRate} sat/vB`);
 
-    // For each UTXO, we need to fetch its transaction to get the scriptPubKey
-    // This is required for proper signature generation
-    const utxosWithScriptPubKey = await Promise.all(
-      utxos.map(async (utxo) => {
-        const txResponse = await fetch(`${this.rpcUrl}/tx/${utxo.txid}`);
-        if (!txResponse.ok) {
-          throw new Error(`Failed to fetch transaction ${utxo.txid}`);
+    // Exact fee for each shape, using the real recipient script length.
+    const recipientScriptEarly = addressToScript(recipient);
+    const vsizeWithChange = p2trSpendVsize([recipientScriptEarly.length, ourScript.length]);
+    const vsizeNoChange = p2trSpendVsize([recipientScriptEarly.length]);
+
+    // Single-input selection: pick the smallest confirmed UTXO that still covers amount + fee.
+    //
+    // Deliberately one input. Each additional input needs its own BIP341 sighash and therefore its
+    // own MPC signature — a separate presign + sign round trip — and the ChainSigner contract here
+    // carries a single message. Rather than silently produce a transaction with one signature and
+    // several unsigned inputs (which is what the previous legacy path would have done), we require
+    // one sufficient UTXO and fail with a clear message otherwise.
+    const feeFor = (outputs: number) =>
+      BigInt(Math.ceil((outputs === 2 ? vsizeWithChange : vsizeNoChange) * feeRate));
+
+    const sorted = [...confirmed].sort((a, b) => a.value - b.value);
+    let chosen: UTXO | undefined;
+    let fee = 0n;
+    let change = 0n;
+    let withChange = true;
+
+    for (const utxo of sorted) {
+      const value = BigInt(utxo.value);
+
+      const feeTwo = feeFor(2);
+      if (value >= amountSats + feeTwo) {
+        const rest = value - amountSats - feeTwo;
+        if (rest >= BigInt(P2TR_DUST_SATS)) {
+          chosen = utxo;
+          fee = feeTwo;
+          change = rest;
+          withChange = true;
+          break;
         }
-        const txData = await txResponse.json();
-        const output = txData.vout[utxo.vout];
-        return {
-          ...utxo,
-          scriptPubKey: output.scriptpubkey,
-        };
-      })
-    );
-
-    if (utxosWithScriptPubKey.length === 0) {
-      throw new Error('No UTXOs available. Address has no funds.');
-    }
-
-    // Convert BTC to satoshis
-    const amountSatoshis = Math.floor(parseFloat(amount) * 1e8);
-    const feeRate = 1; // 1 sat/vbyte for testnet
-
-    // Select UTXOs (simple algorithm: use first UTXO that's large enough)
-    let selectedUtxos: any[] = [];
-    let totalInput = 0;
-
-    for (const utxo of utxosWithScriptPubKey) {
-      if (!utxo.status.confirmed) continue; // Skip unconfirmed
-
-      selectedUtxos.push(utxo);
-      totalInput += utxo.value;
-
-      // Estimate transaction size:
-      // - Input: ~148 bytes per input
-      // - Output: ~34 bytes per output (2 outputs: recipient + change)
-      // - Overhead: ~10 bytes
-      const estimatedSize = selectedUtxos.length * 148 + 2 * 34 + 10;
-      const estimatedFee = estimatedSize * feeRate;
-
-      if (totalInput >= amountSatoshis + estimatedFee) {
+      }
+      // No viable change output — sweep the remainder into the fee instead of creating dust.
+      const feeOne = feeFor(1);
+      if (value >= amountSats + feeOne) {
+        chosen = utxo;
+        fee = value - amountSats;
+        change = 0n;
+        withChange = false;
         break;
       }
     }
 
-    if (totalInput < amountSatoshis) {
-      throw new Error(`Insufficient funds. Have ${totalInput} sats, need ${amountSatoshis} sats`);
+    if (!chosen) {
+      const total = confirmed.reduce((s, u) => s + BigInt(u.value), 0n);
+      const largest = sorted[sorted.length - 1];
+      throw new Error(
+        `No single UTXO covers ${amountSats} sats + fee. Largest is ${largest.value} sats ` +
+          `(${confirmed.length} UTXOs totalling ${total} sats). Each extra input needs its own MPC ` +
+          `signature, so this wallet spends one UTXO per transaction — send an amount that fits ` +
+          `the largest UTXO, or consolidate first.`
+      );
     }
 
-    // Calculate fee and change
-    const estimatedSize = selectedUtxos.length * 148 + 2 * 34 + 10;
-    const fee = estimatedSize * feeRate;
-    const change = totalInput - amountSatoshis - fee;
+    const outputs: { script: Uint8Array; amount: bigint }[] = [
+      { script: recipientScriptEarly, amount: amountSats },
+    ];
+    if (withChange) outputs.push({ script: ourScript, amount: change });
 
-    console.log(`📊 Transaction details:`);
-    console.log(`   Inputs: ${selectedUtxos.length} UTXOs, Total: ${totalInput} sats`);
-    console.log(`   Amount: ${amountSatoshis} sats`);
-    console.log(`   Fee: ${fee} sats (${feeRate} sat/vbyte)`);
-    console.log(`   Change: ${change} sats`);
+    const VERSION = 2;
+    const LOCKTIME = 0;
+    const SEQUENCE = 0xfffffffd; // RBF-enabled
 
-    // Build raw Bitcoin transaction
-    // Version (4 bytes) - little endian
-    const version = Buffer.alloc(4);
-    version.writeUInt32LE(2, 0); // Version 2
-
-    // Input count (1 byte varint)
-    const inputCount = Buffer.from([selectedUtxos.length]);
-
-    // Inputs
-    const inputs = Buffer.concat(
-      selectedUtxos.map((utxo) => {
-        // Previous tx hash (32 bytes, reversed)
-        const txHash = Buffer.from(utxo.txid, 'hex').reverse();
-
-        // Previous output index (4 bytes, little endian)
-        const outputIndex = Buffer.alloc(4);
-        outputIndex.writeUInt32LE(utxo.vout, 0);
-
-        // Script length (1 byte) - 0 for unsigned
-        const scriptLength = Buffer.from([0]);
-
-        // Sequence (4 bytes) - 0xfffffffe for RBF
-        const sequence = Buffer.from([0xfe, 0xff, 0xff, 0xff]);
-
-        return Buffer.concat([txHash, outputIndex, scriptLength, sequence]);
-      })
+    const vsize = withChange ? vsizeWithChange : vsizeNoChange;
+    console.log(`📊 1 input (${chosen.value} sats) → ${outputs.length} output(s), ${vsize} vB`);
+    console.log(
+      `   fee ${fee} sats (${(Number(fee) / vsize).toFixed(2)} sat/vB)` +
+        `${withChange ? `, change ${change} sats` : ' — no change; remainder swept to fee'}`
     );
 
-    // Output count (1 byte varint)
-    const outputCount = Buffer.from([change > 546 ? 2 : 1]); // Only create change output if > dust (546 sats)
+    // Authoritative transaction + sighash from the audited library.
+    const tx = new Transaction({
+      version: VERSION,
+      lockTime: LOCKTIME,
+      allowUnknownOutputs: true,
+      allowLegacyWitnessUtxo: true,
+    });
+    const txidBytes = hexToBytes(chosen.txid); // Blockstream returns display (big-endian) order
+    tx.addInput({
+      txid: txidBytes,
+      index: chosen.vout,
+      sequence: SEQUENCE,
+      witnessUtxo: { script: ourScript, amount: BigInt(chosen.value) },
+    });
+    for (const o of outputs) tx.addOutput({ script: o.script, amount: o.amount });
 
-    // Outputs
-    const recipientOutput = this.createP2PKHOutput(recipient, amountSatoshis);
+    const authoritativeSighash = tx.preimageWitnessV1(
+      0,
+      [ourScript],
+      0, // SIGHASH_DEFAULT
+      [BigInt(chosen.value)]
+    );
 
-    let outputs = recipientOutput;
-    if (change > 546) {
-      const changeOutput = this.createP2PKHOutput(fromAddress, change);
-      outputs = Buffer.concat([recipientOutput, changeOutput]);
+    // Our preimage, shaped so Ika's single SHA256 lands on the same value.
+    // scure takes the txid in display order and reverses it internally; the raw serialization (and
+    // therefore sha_prevouts) uses the reversed form.
+    const messageBytes = taprootSighashPreimage({
+      version: VERSION,
+      lockTime: LOCKTIME,
+      prevTxid: new Uint8Array([...txidBytes].reverse()),
+      prevVout: chosen.vout,
+      prevAmount: BigInt(chosen.value),
+      prevScript: ourScript,
+      sequence: SEQUENCE,
+      outputs,
+      inputIndex: 0,
+    });
+
+    // The guard: prove the hand-built preimage hashes to the audited sighash BEFORE we spend
+    // anything. If these ever diverge, the signature would be unusable and the UTXO wasted.
+    const derivedSighash = sha256(messageBytes);
+    if (bytesToHex(derivedSighash) !== bytesToHex(authoritativeSighash)) {
+      throw new Error(
+        `BIP341 sighash mismatch — refusing to sign. ` +
+          `built=${bytesToHex(derivedSighash)} expected=${bytesToHex(authoritativeSighash)}`
+      );
     }
-
-    // Locktime (4 bytes)
-    const locktime = Buffer.alloc(4);
-
-    // Combine all parts
-    const unsignedTx = Buffer.concat([
-      version,
-      inputCount,
-      inputs,
-      outputCount,
-      outputs,
-      locktime,
-    ]);
-
-    console.log(`✅ Bitcoin transaction built: ${unsignedTx.length} bytes`);
-    console.log(`📋 Raw transaction (hex): ${unsignedTx.toString('hex').substring(0, 40)}...`);
-
-    // === CRITICAL: Build signing transaction with scriptPubKey ===
-    // For Bitcoin P2PKH signing, we must replace the empty scriptSig with the scriptPubKey
-    // of the UTXO being spent, then append SIGHASH_ALL and double SHA256
-
-    console.log('🔐 Building signing transaction for Bitcoin sighash...');
-
-    // For simplicity, assume single input (can be extended for multiple inputs)
-    const utxo = selectedUtxos[0];
-    const scriptPubKeyHex = utxo.scriptPubKey;
-    const scriptPubKey = Buffer.from(scriptPubKeyHex, 'hex');
-
-    console.log(`📋 ScriptPubKey from UTXO: ${scriptPubKeyHex}`);
-    console.log(`📋 ScriptPubKey length: ${scriptPubKey.length} bytes`);
-
-    // Build signing transaction: replace empty scriptSig with scriptPubKey
-    const voutBuffer = Buffer.alloc(4);
-    voutBuffer.writeUInt32LE(utxo.vout, 0);
-
-    const signingInput = Buffer.concat([
-      Buffer.from(utxo.txid, 'hex').reverse(),  // Previous tx hash (reversed)
-      voutBuffer,                                 // Previous output index (little endian)
-      Buffer.from([scriptPubKey.length]),        // Script length
-      scriptPubKey,                               // ScriptPubKey (NOT empty!)
-      Buffer.from([0xfe, 0xff, 0xff, 0xff]),    // Sequence
-    ]);
-
-    const signingTx = Buffer.concat([
-      version,
-      inputCount,
-      signingInput,
-      outputCount,
-      outputs,
-      locktime,
-      Buffer.from([0x01, 0x00, 0x00, 0x00]),  // SIGHASH_ALL (4 bytes, little endian)
-    ]);
-
-    console.log(`📋 Signing transaction: ${signingTx.length} bytes`);
-    console.log(`📋 Signing tx hex (first 100 chars): ${signingTx.toString('hex').substring(0, 100)}...`);
-
-    // CRITICAL: Pass RAW signing transaction to dWallet, NOT the hash!
-    // dWallet will hash it internally with DoubleSHA256 based on hashScheme parameter
-    const messageBytes = new Uint8Array(signingTx);
-
-    // For logging: Calculate what the sighash SHOULD be after dWallet hashes it
-    const crypto = require('crypto');
-    const hash1 = crypto.createHash('sha256').update(signingTx).digest();
-    const expectedSighash = crypto.createHash('sha256').update(hash1).digest();
-
-    console.log(`✅ Passing RAW signing transaction to dWallet: ${signingTx.length} bytes`);
-    console.log(`📋 Expected sighash after DoubleSHA256: ${expectedSighash.toString('hex')}`);
-    console.log(`📋 dWallet will apply DoubleSHA256 hashing internally`);
+    console.log(`✅ BIP341 sighash verified against @scure/btc-signer: ${bytesToHex(derivedSighash).slice(0, 16)}…`);
 
     return {
-      messageBytes,  // Pass raw signing transaction, dWallet will hash it!
+      messageBytes,
       unsignedTx: {
-        rawTx: unsignedTx,
-        selectedUtxos,
-        recipient,
-        amount: amountSatoshis,
-        change,
-        fee,
-        fromAddress,
+        tx,
+        sighash: authoritativeSighash,
+        xOnly,
+        selectedUtxo: chosen,
+        fee: Number(fee),
       },
     };
   }
 
   /**
-   * Create P2PKH output script
-   */
-  private createP2PKHOutput(address: string, value: number): Buffer {
-    // Decode base58 address to get public key hash
-    const decoded = this.base58Decode(address);
-
-    // Remove version byte (1 byte) and checksum (4 bytes)
-    const pubKeyHash = decoded.slice(1, -4);
-
-    // Value (8 bytes, little endian)
-    // Browser-compatible way to write 64-bit integer
-    const valueBuffer = Buffer.alloc(8);
-    const valueBigInt = BigInt(value);
-    for (let i = 0; i < 8; i++) {
-      valueBuffer[i] = Number((valueBigInt >> BigInt(i * 8)) & BigInt(0xff));
-    }
-
-    // P2PKH script: OP_DUP OP_HASH160 <pubKeyHash> OP_EQUALVERIFY OP_CHECKSIG
-    const script = Buffer.concat([
-      Buffer.from([0x76]), // OP_DUP
-      Buffer.from([0xa9]), // OP_HASH160
-      Buffer.from([0x14]), // Push 20 bytes
-      pubKeyHash,
-      Buffer.from([0x88]), // OP_EQUALVERIFY
-      Buffer.from([0xac]), // OP_CHECKSIG
-    ]);
-
-    // Script length (1 byte varint)
-    const scriptLength = Buffer.from([script.length]);
-
-    return Buffer.concat([valueBuffer, scriptLength, script]);
-  }
-
-  /**
-   * Base58 decode (simplified for P2PKH addresses)
-   */
-  private base58Decode(address: string): Buffer {
-    const ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
-
-    let result = BigInt(0);
-    for (let i = 0; i < address.length; i++) {
-      const value = BigInt(ALPHABET.indexOf(address[i]));
-      if (value === BigInt(-1)) {
-        throw new Error('Invalid base58 character');
-      }
-      result = result * BigInt(58) + value;
-    }
-
-    // Convert to buffer
-    const hex = result.toString(16).padStart(50, '0');
-    return Buffer.from(hex, 'hex');
-  }
-
-  /**
-   * Broadcast signed Bitcoin transaction
-   * Constructs the final signed transaction with scriptSig
+   * Attach the Schnorr signature as the input witness and serialize.
+   *
+   * SIGHASH_DEFAULT means the witness is exactly the bare 64-byte signature — no trailing sighash
+   * byte (that is only for explicit non-default types), no pubkey (it is already the output key),
+   * no scriptSig at all.
    */
   async broadcastTransaction(
-    unsignedTx: any,
-    signature: Uint8Array,
-    recoveryId: number
+    unsignedTx: {
+      tx: Transaction;
+      sighash: Uint8Array;
+      xOnly: Uint8Array;
+      selectedUtxo: UTXO;
+    },
+    signature: Uint8Array
   ): Promise<SignedTransactionResult> {
-    console.log('📝 Finalizing Bitcoin transaction with signature...');
+    const { tx, sighash, xOnly } = unsignedTx;
 
-    const { rawTx, selectedUtxos, publicKey } = unsignedTx;
-
-    if (!publicKey) {
-      throw new Error('Public key is required for Bitcoin signing');
+    const sig = signature.length === 65 ? signature.slice(0, 64) : signature;
+    if (sig.length !== 64) {
+      throw new Error(`Expected a 64-byte BIP340 Schnorr signature, got ${signature.length} bytes`);
     }
 
-    console.log('🔑 Using public key:', publicKey.substring(0, 40) + '...');
+    // Verify locally exactly the way Ika's own test does — catches a bad signature before it costs
+    // a fee, and confirms the untweaked output key assumption holds.
+    if (!schnorr.verify(sig, sighash, xOnly)) {
+      throw new Error(
+        'Schnorr signature does not verify against the dWallet x-only key over the BIP341 sighash. ' +
+          'Refusing to broadcast an invalid transaction.'
+      );
+    }
+    console.log('✅ Schnorr signature verifies against the taproot output key');
 
-    // Extract r and s from signature (64 bytes: 32 for r, 32 for s)
-    const r = signature.slice(0, 32);
-    const s = signature.slice(32, 64);
+    tx.updateInput(0, { finalScriptWitness: [sig] });
 
-    // Create DER-encoded signature with SIGHASH_ALL
-    const derSig = this.createDERSignature(r, s);
-    console.log('📋 DER signature:', Buffer.from(derSig).toString('hex'));
+    const serialized = bytesToHex(tx.extract());
+    const txid = tx.id;
 
-    // Create scriptSig for P2PKH: <signature> <pubkey>
-    const pubKeyBytes = Buffer.from(publicKey.startsWith('0x') ? publicKey.slice(2) : publicKey, 'hex');
-    const scriptSig = Buffer.concat([
-      Buffer.from([derSig.length]),  // Push DER signature length
-      Buffer.from(derSig),
-      Buffer.from([pubKeyBytes.length]),  // Push pubkey length
-      pubKeyBytes,
-    ]);
+    console.log('📡 Broadcasting Bitcoin Taproot transaction…');
+    const res = await fetch(`${this.rpcUrl}/tx`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: serialized,
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`Bitcoin broadcast failed: ${res.status} — ${body}`);
+    }
+    const broadcastTxid = (await res.text()).trim();
 
-    console.log('📋 ScriptSig length:', scriptSig.length);
-    console.log('📋 ScriptSig hex:', scriptSig.toString('hex'));
-
-    // Now rebuild the transaction with scriptSig
-    // Parse the unsigned transaction to insert scriptSig
-    const unsignedBuffer = Buffer.from(rawTx);
-
-    console.log('📋 Unsigned tx hex:', unsignedBuffer.toString('hex'));
-    console.log('📋 Unsigned tx length:', unsignedBuffer.length);
-
-    // Find where to insert scriptSig (after the outpoint in first input)
-    // Version (4 bytes) + input count (1 byte) + txid (32 bytes) + vout (4 bytes) = 41 bytes
-    const prefix = unsignedBuffer.slice(0, 41);
-
-    console.log('📋 Prefix (41 bytes):', prefix.toString('hex'));
-    console.log('📋 Empty scriptSig length byte at position 41:', unsignedBuffer[41]);
-
-    // Skip only the empty scriptSig length (1 byte with value 0)
-    // The suffix includes sequence + outputs + locktime
-    const suffixStart = 41 + 1;
-    const suffix = unsignedBuffer.slice(suffixStart);
-
-    console.log('📋 Suffix starts at byte', suffixStart, ':', suffix.toString('hex').substring(0, 40) + '...');
-
-    // Construct final signed transaction
-    // Structure: [prefix][scriptSig_length][scriptSig][suffix (contains sequence+outputs+locktime)]
-    const signedTx = Buffer.concat([
-      prefix,
-      Buffer.from([scriptSig.length]),  // New script length
-      scriptSig,
-      suffix,  // Contains sequence (0xfeffffff) + outputs + locktime
-    ]);
-
-    const txHex = signedTx.toString('hex');
-    const txHash = Buffer.from(ethers.keccak256('0x' + txHex).slice(2), 'hex').reverse().toString('hex');
-
-    console.log('✅ Bitcoin transaction finalized!');
-    console.log('📋 Signed transaction length:', signedTx.length, 'bytes');
-    console.log('📋 Complete TX hex:', txHex);
+    console.log('✅ Broadcast:', broadcastTxid);
+    console.log('📋 Explorer:', `${MAINNET_CHAINS.Bitcoin.blockExplorer}/tx/${broadcastTxid}`);
 
     return {
-      signature: Buffer.from(signature).toString('hex'),
-      hash: txHash,
-      txHash: txHash,
-      serialized: txHex,
+      signature: '0x' + bytesToHex(sig),
+      hash: broadcastTxid || txid,
+      txHash: broadcastTxid || txid,
+      serialized,
     };
-  }
-
-  /**
-   * Create DER-encoded signature
-   */
-  private createDERSignature(r: Uint8Array, s: Uint8Array): Uint8Array {
-    // DER format: 0x30 [total-length] 0x02 [r-length] [r] 0x02 [s-length] [s]
-
-    // Remove leading zeros from r and s
-    let rBytes = Buffer.from(r);
-    while (rBytes[0] === 0 && rBytes.length > 1) {
-      rBytes = rBytes.slice(1);
-    }
-
-    let sBytes = Buffer.from(s);
-    while (sBytes[0] === 0 && sBytes.length > 1) {
-      sBytes = sBytes.slice(1);
-    }
-
-    // Add 0x00 prefix if high bit is set (to indicate positive number)
-    if (rBytes[0] >= 0x80) {
-      rBytes = Buffer.concat([Buffer.from([0x00]), rBytes]);
-    }
-    if (sBytes[0] >= 0x80) {
-      sBytes = Buffer.concat([Buffer.from([0x00]), sBytes]);
-    }
-
-    const totalLength = 2 + rBytes.length + 2 + sBytes.length;
-
-    const derSig = Buffer.concat([
-      Buffer.from([0x30, totalLength]),
-      Buffer.from([0x02, rBytes.length]),
-      rBytes,
-      Buffer.from([0x02, sBytes.length]),
-      sBytes,
-      Buffer.from([0x01]), // SIGHASH_ALL
-    ]);
-
-    return new Uint8Array(derSig);
   }
 }
 
-/**
- * Get Bitcoin chain signer
- */
-export function getBitcoinSigner(): ChainSigner {
+/** Factory used by the chain registry in `./index.ts`. */
+export function getBitcoinSigner(): BitcoinSigner {
   return new BitcoinSigner();
 }

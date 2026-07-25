@@ -4,12 +4,13 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
+import { CARDANO_MAINNET } from '@/lib/config/chains';
 
 export async function GET(request: NextRequest) {
   try {
     // Fetch current chain tip from Koios API
     const response = await fetch(
-      `https://preview.koios.rest/api/v1/tip`,
+      `${CARDANO_MAINNET.rpcUrl}/tip`,
       {
         method: 'GET',
         headers: {

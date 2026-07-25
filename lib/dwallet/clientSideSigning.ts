@@ -1,37 +1,64 @@
 /**
  * Client-Side dWallet Transaction Signing
  *
- * This module orchestrates the dWallet 2PC-MPC signing process.
+ * This module orchestrates the dWallet 2PC-MPC signing process against Ika MAINNET.
  * Chain-specific logic is delegated to modular chain signers.
  *
  * Architecture:
  * - core/: Shared utilities (encryption, client initialization, types)
  * - chains/: Chain-specific signing implementations (Ethereum, Solana, etc.)
  * - clientSideSigning.ts: MPC orchestration and coordination
+ *
+ * 2PC-MPC v4: presignatures come from the network's continuously-replenished pool via
+ * `requestGlobalPresign` rather than being computed per-dWallet on demand. See
+ * `lib/ika/globalPresign.ts` for why, and for the on-chain policy that decides it.
  */
 
 import { Transaction } from '@mysten/sui/transactions';
-import { SuiClient } from '@mysten/sui/client';
-import {
-  IkaClient,
-  IkaTransaction,
-  UserShareEncryptionKeys,
-  Curve,
-  SignatureAlgorithm,
-  Hash,
-} from '@ika.xyz/sdk';
+import { IkaTransaction } from '@ika.xyz/sdk';
 import { ethers } from 'ethers';
-import { PublicKey, Transaction as SolanaTransaction, Connection, clusterApiUrl } from '@solana/web3.js';
+import { PublicKey, Transaction as SolanaTransaction, Connection } from '@solana/web3.js';
 
 // Import refactored modules
 import { SignTransactionParams, SignedTransactionResult, UnsignedTransaction } from './core/types';
 import { generateDeterministicEncryptionSeed } from './core/encryption';
-import { initializeClientSideSigning } from './core/client';
 import { getChainSigner } from './chains';
+import { getIkaClient, chainCrypto } from '@/lib/ika/ikaClient';
+import { takeReady, pendingPresign, primePresignPool, refillInBackground } from '@/lib/ika/presignPool';
+import { peekUserShare, prepareUserShare } from '@/lib/ika/userShare';
+import { generateEncryptionKeys } from './core/encryption';
+import { getDWalletMeta } from './dwalletMeta';
+import { Timings } from './core/timings';
+import { prepareIkaFeeCoin } from '@/lib/ika/ikaFee';
+import { MAINNET_CHAINS, SOLANA_MAINNET, txExplorerUrl } from '@/lib/config/chains';
 
 // Re-export types for backwards compatibility
 export type { SignTransactionParams, SignedTransactionResult } from './core/types';
 export { initializeClientSideSigning } from './core/client';
+
+/**
+ * Polling cadence for MPC session state (presign, sign).
+ *
+ * 2PC-MPC v4 completes a pooled presign essentially immediately and the online signing round in
+ * ~400ms. The previous 2000ms interval meant a send spent seconds sitting in `setTimeout` after the
+ * network had already finished — the dominant source of the old perceived slowness. 250ms tracks the
+ * protocol closely while staying polite to the RPC; the timeout stays generous for a congested epoch.
+ */
+const MPC_POLL = { timeout: 60_000, interval: 250 } as const;
+
+/**
+ * Verbose signing logs, off by default.
+ *
+ * This flow logged ~200 lines per send, including full JSON dumps of transaction effects, the entire
+ * events array and the whole dWallet object. That made the console unusable and hid real failures.
+ * The numbered step markers below stay as ordinary logs so progress is still visible; everything else
+ * is gated. Set NEXT_PUBLIC_DEBUG_SIGNING=1 for the full trace.
+ */
+const SIGN_VERBOSE = process.env.NEXT_PUBLIC_DEBUG_SIGNING === '1';
+const debug = (...args: unknown[]) => {
+  if (SIGN_VERBOSE) console.log(...args);
+};
+
 
 /**
  * Step 2: Build unsigned transaction for the target blockchain
@@ -45,7 +72,7 @@ export async function buildUnsignedTransaction(
   fromAddress: string,
   publicKey?: string
 ): Promise<UnsignedTransaction> {
-  console.log(`📝 Building unsigned ${chain} transaction...`);
+  debug(`📝 Building unsigned ${chain} transaction...`);
 
   // Get chain-specific signer
   const signer = getChainSigner(chain);
@@ -67,14 +94,13 @@ export async function buildUnsignedTransaction(
 export async function signWithDWallet(
   params: SignTransactionParams
 ): Promise<SignedTransactionResult> {
-  console.log('🔐 Starting dWallet signing process...');
+  const T = new Timings(`Send ${params.amount} on ${params.chain}`);
 
-  // Determine curve based on chain
-  const curve = ['Solana', 'Polkadot', 'Cardano', 'NEAR'].includes(params.chain)
-    ? Curve.ED25519
-    : Curve.SECP256K1;
+  // Curve / algorithm / hash come from one shared resolver so the presignature pool and this path
+  // cannot disagree — a presignature bought for the wrong algorithm is unusable, and the mismatch
+  // would only surface at signing time.
+  const { curve, signatureAlgorithm, hashScheme } = chainCrypto(params.chain);
 
-  // CRITICAL: Get encryption seed - regenerate deterministically from Sui address + curve
   const suiAddress = params.userAccount?.address;
   if (!suiAddress) {
     throw new Error('User account address is required for deterministic seed generation');
@@ -82,575 +108,168 @@ export async function signWithDWallet(
 
   const encryptionSeed = generateDeterministicEncryptionSeed(suiAddress, curve);
 
-  // Initialize client-side signing
-  const { ikaClient, userShareEncryptionKeys } = await initializeClientSideSigning(
-    params.suiClient,
-    encryptionSeed,
-    curve
+  /**
+   * === Prologue: everything the sign transaction needs, resolved concurrently ===
+   *
+   * These were previously seven strictly sequential awaits, each waiting on the one before for no
+   * reason — measured at ~3.5s of round-trips before the signing round could even begin. Only the
+   * genuine dependencies are kept: the dWallet needs the client, its metadata needs the dWallet, and
+   * the unsigned transaction needs the derived address. Everything else overlaps, so the prologue now
+   * costs roughly its slowest single member instead of their sum.
+   */
+  // Each member is timed individually: a single "prologue" row would hide which of them dominates,
+  // which is the only thing that makes the next latency regression diagnosable.
+  const timed = <V,>(name: string, p: Promise<V>): Promise<V> => {
+    const t0 = performance.now();
+    return p.finally(() => T.note(name, performance.now() - t0));
+  };
+
+  const ikaClientP = timed('· ika client', getIkaClient(params.suiClient));
+  const keysP = timed('· share keys', generateEncryptionKeys(encryptionSeed, curve, suiAddress));
+  const gasP = timed('· sui balance', params.suiClient.getBalance({ owner: suiAddress }));
+  const dWalletP = timed(
+    '· dwallet fetch',
+    ikaClientP.then((c) => c.getDWallet(params.dwalletId))
+  );
+  const metaP = timed('· dwallet meta', dWalletP.then((dw) =>
+    getDWalletMeta({
+      suiClient: params.suiClient,
+      dwalletId: params.dwalletId,
+      chain: params.chain,
+      curve,
+      dWallet: dw,
+    })
+  ));
+  const unsignedP = timed(
+    '· build chain tx',
+    metaP.then((m) =>
+      buildUnsignedTransaction(params.chain, params.recipient, params.amount, m.address, m.publicKeyHex)
+    )
+  );
+  const shareP = timed(
+    '· user share',
+    Promise.all([ikaClientP, metaP]).then(([c, m]) =>
+      params.encryptedShareId
+        ? c.getEncryptedUserSecretKeyShare(params.encryptedShareId)
+        : m.encryptedShareId
+          ? c.getEncryptedUserSecretKeyShare(m.encryptedShareId)
+          : undefined
+    )
   );
 
-  // Fetch dWallet from blockchain to get public key
-  console.log('📡 Fetching dWallet from blockchain...');
-  console.log('🆔 dWallet ID:', params.dwalletId);
-  const dWallet = await ikaClient.getDWallet(params.dwalletId);
-  console.log('✅ dWallet fetched');
-
-  // Extract public key and derive address
-  let fromAddress = '';
-  let publicKeyHex = '';
-
-  if (dWallet.state.$kind === 'Active') {
-    const pubOutputBytes = (dWallet.state as any).Active?.public_output;
-    if (pubOutputBytes && Array.isArray(pubOutputBytes)) {
-      console.log('🔍 Raw public_output from blockchain:', pubOutputBytes.slice(0, 10), '... (first 10 bytes)');
-      console.log('🔍 Full public_output length:', pubOutputBytes.length, 'bytes');
-
-      const { publicKeyFromDWalletOutput } = await import('@ika.xyz/sdk');
-
-      console.log(`🔍 Extracting public key for curve: ${curve}`);
-
-      const actualPublicKey = await publicKeyFromDWalletOutput(
-        curve,  // Curve enum (Curve.SECP256K1 or Curve.ED25519)
-        Uint8Array.from(pubOutputBytes)
-      );
-
-      console.log('🔍 After publicKeyFromDWalletOutput:');
-      console.log('   Raw bytes:', Array.from(actualPublicKey.slice(0, 10)), '... (first 10 bytes)');
-      console.log('   Length:', actualPublicKey.length, 'bytes');
-
-      publicKeyHex = '0x' + Buffer.from(actualPublicKey).toString('hex');
-      console.log('🔑 Public key hex:', publicKeyHex);
-      console.log('🔑 Public key length:', actualPublicKey.length, 'bytes');
-
-      // Derive address from public key based on curve AND chain
-      if (curve === Curve.SECP256K1) {
-        console.log('');
-        console.log(`🎯 ADDRESS DERIVATION FOR ${params.chain}`);
-        console.log('═══════════════════════════════════════════════════════');
-
-        if (params.chain === 'Bitcoin') {
-          // For Bitcoin, use Bitcoin address derivation
-          const { deriveBitcoinAddress } = await import('../utils/deriveAddresses');
-          fromAddress = deriveBitcoinAddress(publicKeyHex);
-          console.log('✅ Derived Bitcoin address:', fromAddress);
-        } else {
-          // For EVM chains, derive Ethereum address using the official ethers.js method
-          const { computeAddress, SigningKey } = await import('ethers');
-
-          let uncompressedPubKey: string;
-
-          if (actualPublicKey.length === 33) {
-            // Compressed public key (33 bytes) - decompress using ethers.SigningKey
-            const compressedHex = '0x' + Buffer.from(actualPublicKey).toString('hex');
-            console.log('📝 Compressed public key (33 bytes):', compressedHex);
-
-            // Method from console3.md line 68:
-            // const uncompressedPubKey = ethers.SigningKey.computePublicKey(compressedPubKey, false);
-            uncompressedPubKey = SigningKey.computePublicKey(compressedHex, false);
-            console.log('✅ Decompressed to uncompressed (65 bytes):', uncompressedPubKey.substring(0, 20) + '...');
-          } else if (actualPublicKey.length === 64) {
-            // Uncompressed without 0x04 prefix - add it
-            console.log('📝 Public key is uncompressed without prefix (64 bytes)');
-            uncompressedPubKey = '0x04' + publicKeyHex.slice(2);
-          } else if (actualPublicKey.length === 65) {
-            // Already uncompressed with 0x04 prefix
-            console.log('📝 Public key is already uncompressed (65 bytes)');
-            uncompressedPubKey = publicKeyHex;
-          } else {
-            throw new Error(`Unexpected public key length: ${actualPublicKey.length} bytes`);
-          }
-
-          // Derive address using ethers.computeAddress (does KECCAK256 + last 20 bytes automatically)
-          // This matches console3.md line 72:
-          // const address = ethers.computeAddress(uncompressedPubKey);
-          fromAddress = computeAddress(uncompressedPubKey);
-
-          console.log('✅ Derived Ethereum address:', fromAddress);
-        }
-
-        console.log('═══════════════════════════════════════════════════════');
-        console.log('');
-      } else if (curve === Curve.ED25519) {
-        // ED25519 chains: Solana, Polkadot, Cardano, NEAR
-        if (actualPublicKey.length !== 32) {
-          throw new Error(`Unexpected ED25519 public key length: ${actualPublicKey.length} bytes (expected 32)`);
-        }
-
-        console.log('');
-        console.log(`🎯 ADDRESS DERIVATION FOR ${params.chain}`);
-        console.log('═══════════════════════════════════════════════════════');
-
-        if (params.chain === 'Solana') {
-          // For Solana, the public key IS the address (base58 encoded)
-          const solanaPublicKey = new PublicKey(actualPublicKey);
-          fromAddress = solanaPublicKey.toBase58();
-          console.log('✅ Derived Solana address:', fromAddress);
-        } else if (params.chain === 'Polkadot') {
-          // For Polkadot, derive SS58 address
-          const { derivePolkadotAddress } = await import('../utils/deriveAddresses');
-          fromAddress = derivePolkadotAddress(publicKeyHex);
-          console.log('✅ Derived Polkadot address:', fromAddress);
-        } else if (params.chain === 'Cardano') {
-          // For Cardano, derive Bech32 address
-          const { deriveCardanoAddress } = await import('../utils/deriveAddresses');
-          fromAddress = deriveCardanoAddress(publicKeyHex);
-          console.log('✅ Derived Cardano address:', fromAddress);
-        } else if (params.chain === 'NEAR') {
-          // For NEAR, use hex implicit account
-          const { deriveNearAddress } = await import('../utils/deriveAddresses');
-          fromAddress = deriveNearAddress(publicKeyHex);
-          console.log('✅ Derived NEAR address:', fromAddress);
-        } else {
-          throw new Error(`Unsupported ED25519 chain: ${params.chain}`);
-        }
-
-        console.log('═══════════════════════════════════════════════════════');
-        console.log('');
-      }
-    }
-  }
-
-  if (!fromAddress) {
-    throw new Error('Could not derive address from dWallet. Is it activated?');
-  }
-
-  // Determine signature algorithm and hash scheme based on curve
-  const signatureAlgorithm = curve === Curve.SECP256K1
-    ? SignatureAlgorithm.ECDSASecp256k1
-    : SignatureAlgorithm.EdDSA;
-
-  // Hash scheme depends on the blockchain
-  // Ethereum (SECP256K1 ECDSA) requires KECCAK256
-  // Bitcoin (SECP256K1 ECDSA) requires DoubleSHA256
-  // Solana (ED25519 EdDSA) uses SHA512
-  // This must match the hash scheme used in discovery function
-  let hashScheme: Hash;
-  if (params.chain === 'Bitcoin') {
-    hashScheme = Hash.DoubleSHA256;
-  } else if (curve === Curve.SECP256K1) {
-    hashScheme = Hash.KECCAK256; // Ethereum
-  } else {
-    hashScheme = Hash.SHA512; // Solana
-  }
-
-  // === STEP 1: Create Presign Capability ===
-  // Do this BEFORE building the transaction to minimize time between blockhash fetch and broadcast
-  console.log('1️⃣ Creating presign capability...');
-  console.log('⏰ NOTE: Building transaction AFTER presign to minimize blockhash expiration risk');
-
-  const presignTx = new Transaction();
-  const presignIkaTx = new IkaTransaction({
-    ikaClient,
-    transaction: presignTx,
-    userShareEncryptionKeys,
-  });
-
-  // Get IKA coins for fees
-  const ikaCoins = await params.suiClient.getCoins({
-    owner: params.userAccount.address,
-    coinType: `${ikaClient.ikaConfig.packages.ikaPackage}::ika::IKA`,
-  });
-
-  if (ikaCoins.data.length === 0) {
-    throw new Error('No IKA tokens available for signing. Please acquire IKA tokens first.');
-  }
-
-  const ikaCoin = presignTx.object(ikaCoins.data[0].coinObjectId);
-
-  // IMPORTANT: Regular DKG dWallets require requestGlobalPresign (error 31: EOnlyGlobalPresignAllowed)
-  // Only imported-key dWallets can use requestPresign
-  // The SDK docs are incomplete - they don't mention this distinction
-  console.log('🔑 Signature algorithm:', signatureAlgorithm);
-  console.log('📝 Using requestGlobalPresign (required for regular DKG dWallets)');
-
-  // CRITICAL: requestGlobalPresign returns an unverified presign capability
-  // We need to TRANSFER this object back to ourselves to get its ID after transaction execution
-  const unverifiedPresignCap = presignIkaTx.requestGlobalPresign({
-    curve,
-    dwalletNetworkEncryptionKeyId: (dWallet as any).dwallet_network_encryption_key_id,
-    signatureAlgorithm,
-    ikaCoin,
-    suiCoin: presignTx.gas,
-  });
-
-  // Transfer the presign capability to ourselves so we can get its ID
-  presignTx.transferObjects([unverifiedPresignCap], params.userAccount.address);
-
-  console.log('✅ Unverified presign capability created and will be transferred');
-  console.log('🔍 Presign cap object (before transfer):', unverifiedPresignCap);
-
-  presignTx.setGasBudget(50000000);
-
-  // Execute presign transaction using connected Sui wallet
-  console.log('⏳ Executing presign transaction with Sui wallet...');
-  let presignTxResult;
-  try {
-    presignTxResult = await params.signAndExecuteTransaction({
-      transaction: presignTx,
-      options: {
-        showEffects: true,
-        showEvents: true,
-      },
-    });
-  } catch (error: any) {
-    console.error('Failed to execute presign transaction:', error);
-    throw new Error(`Failed to execute presign transaction: ${error.message}`);
-  }
-
-  console.log('Presign transaction result:', presignTxResult);
-  console.log('🔍 Presign transaction result keys:', Object.keys(presignTxResult || {}));
-  console.log('🔍 Presign transaction effects:', JSON.stringify(presignTxResult?.effects, null, 2));
-  console.log('🔍 Presign transaction events:', JSON.stringify(presignTxResult?.events, null, 2));
-
-  // Check if transaction was successful
-  // Parse the effects to determine transaction status
-  let effectsObj = presignTxResult?.effects;
-
-  // If effects is a string (base64 encoded), we need to check the status differently
-  if (typeof effectsObj === 'string') {
-    console.log('⚠️ Effects is base64 encoded, fetching full transaction details...');
-  }
-
-  if (!presignTxResult.digest) {
-    throw new Error('No transaction digest received');
-  }
-
-  console.log('✅ Presign transaction submitted:', presignTxResult.digest);
-
-  // Wait a moment for the transaction to be processed
-  await new Promise(resolve => setTimeout(resolve, 2000));
-
-  // Get the full transaction details to check status
-  const txDetails = await params.suiClient.getTransactionBlock({
-    digest: presignTxResult.digest,
-    options: {
-      showEvents: true,
-      showEffects: true,
-      showObjectChanges: true,
-    },
-  });
-
-  // Check if transaction was successful
-  const status = (txDetails.effects as any)?.status?.status;
-
-  if (status === 'failure') {
-    const errorMsg = (txDetails.effects as any)?.status?.error || 'Unknown error';
-    console.error('❌ Presign transaction failed:', errorMsg);
-    console.error('Full effects:', JSON.stringify(txDetails.effects, null, 2));
-
-    // Parse the error to give a helpful message
-    if (errorMsg.includes('sessions_manager') && errorMsg.includes('error_code: 1')) {
-      throw new Error('❌ Session initialization failed (sessions_manager error_code: 1)\n\n' +
-        'This error typically occurs due to:\n' +
-        '1. 🪙 **Insufficient IKA tokens** - You need IKA tokens to pay for presign operations\n' +
-        '2. 🔒 **Session limit reached** - Too many active sessions for this dWallet\n' +
-        '3. ⏰ **Active session conflict** - A previous session wasn\'t properly closed\n\n' +
-        '📝 **How to fix:**\n' +
-        '- Check your IKA token balance in your wallet\n' +
-        '- Acquire more IKA tokens if balance is low\n' +
-        '- Wait a few minutes for previous sessions to expire\n' +
-        '- Try again with a fresh presign request\n\n' +
-        'Full error: ' + errorMsg);
-    }
-
-    throw new Error('Presign transaction failed: ' + errorMsg);
-  }
-
-  console.log('✅ Presign transaction succeeded');
-
-  console.log('📋 Transaction object changes:', txDetails.objectChanges);
-  console.log('📋 Transaction effects:', JSON.stringify(txDetails.effects, null, 2));
-
-  // For EdDSA with requestGlobalPresign, the presign capability might be handled differently
-  // Instead of creating a transferable object, it might directly create a presign session in the coordinator
-  // Let's try to use the Ika SDK to query for presign sessions
-
-  console.log('🔍 Attempting to find presign session via IkaClient...');
-
-  // Get all presign sessions for this dWallet
-  // The Ika SDK might have methods to query active presigns
-  let presignId: string | undefined;
-
-  // Strategy 1: Check if the transaction result contains presign session info in events
-  if (txDetails.events && txDetails.events.length > 0) {
-    console.log('📋 Transaction events:', JSON.stringify(txDetails.events, null, 2));
-
-    // Look for presign-related events
-    for (const event of txDetails.events) {
-      const eventType = event.type;
-      if (eventType.includes('Presign') || eventType.includes('presign')) {
-        console.log('🎯 Found presign event:', event);
-        // Extract presign ID from event
-        const parsedJson = event.parsedJson as any;
-        presignId = parsedJson?.presign_id || parsedJson?.id || parsedJson?.session_id;
-        if (presignId) {
-          console.log('✅ Found presign ID in event:', presignId);
-          break;
-        }
-      }
-    }
-  }
-
-  // Strategy 2: Try to find created presign capability object
-  if (!presignId) {
-    console.log('🔍 Looking for presign capability in object changes...');
-
-    const presignCapObject = txDetails.objectChanges?.find((change: any) => {
-      if (change.type === 'created') {
-        const objType = change.objectType || '';
-        return objType.includes('UnverifiedPresignCap') || objType.includes('PresignCap');
-      }
-      return false;
-    });
-
-    if (presignCapObject) {
-      const presignCapId = (presignCapObject as any).objectId;
-      console.log('✅ Found presign capability in objectChanges:', presignCapId);
-
-      // Query the presign capability object to get the presign session ID
-      const presignCapDetails = await params.suiClient.getObject({
-        id: presignCapId,
-        options: { showContent: true, showType: true },
-      });
-
-      console.log('Presign capability details:', presignCapDetails);
-
-      // Extract the presign session ID from the capability object's fields
-      const capContent = presignCapDetails.data?.content as any;
-      if (capContent && capContent.dataType === 'moveObject') {
-        // The presign session ID should be in the fields
-        presignId = capContent.fields?.presign_id || capContent.fields?.id?.id;
-      }
-    }
-  }
-
-  // Strategy 3: For EdDSA global presign, try querying the coordinator for active presigns
-  if (!presignId) {
-    console.log('🔍 Attempting alternate approach: querying DWalletCoordinator for active presigns...');
-
-    // The coordinator object ID from the mutation
-    const coordinatorChange = txDetails.objectChanges?.find((change: any) =>
-      change.objectType?.includes('DWalletCoordinator')
+  const [ikaClient, userShareEncryptionKeys, gasBalance, dWallet, meta, built, encShare] =
+    await T.step('prologue (all of the above, concurrent)', () =>
+      Promise.all([ikaClientP, keysP, gasP, dWalletP, metaP, unsignedP, shareP])
     );
 
-    if (coordinatorChange) {
-      console.log('📋 Found coordinator in changes:', (coordinatorChange as any).objectId);
+  /**
+   * Fail on an empty gas tank — but only after the (cheap, parallel) prologue, and always before a
+   * presignature is consumed.
+   *
+   * Without this, running out of SUI surfaced as an opaque 502 from /api/zklogin/execute carrying a raw
+   * Sui error ("Balance of gas object … is lower than the needed amount"). A signing round is ~0.02 SUI;
+   * the floor leaves room for the sign transaction and a retry.
+   */
+  const SUI_FLOOR_MIST = 30_000_000n;
+  if (BigInt(gasBalance.totalBalance) < SUI_FLOOR_MIST) {
+    throw new Error(
+      `Not enough SUI for gas: ${(Number(gasBalance.totalBalance) / 1e9).toFixed(4)} SUI. ` +
+        `Signing needs roughly 0.02 SUI per transaction — top up this address and try again.`
+    );
+  }
 
-      // Try to get dynamic fields of the coordinator which might contain presign sessions
-      try {
-        const coordinatorId = (coordinatorChange as any).objectId;
-        const dynamicFields = await params.suiClient.getDynamicFields({
-          parentId: coordinatorId,
-        });
+  const fromAddress = meta.address;
+  const publicKeyHex = meta.publicKeyHex;
+  const isImportedKey = meta.isImportedKey;
+  let { messageBytes, unsignedTx } = built;
 
-        console.log('📋 Coordinator dynamic fields:', JSON.stringify(dynamicFields, null, 2));
-
-        // Look for presign-related dynamic fields
-        for (const field of dynamicFields.data) {
-          const fieldName = field.name;
-          console.log('🔍 Checking dynamic field:', fieldName);
-
-          if (fieldName && typeof fieldName === 'object') {
-            const fieldNameStr = JSON.stringify(fieldName);
-            if (fieldNameStr.includes('presign') || fieldNameStr.includes('Presign')) {
-              console.log('🎯 Found presign-related dynamic field:', fieldName);
-
-              // Get the field object
-              const fieldObj = await params.suiClient.getDynamicFieldObject({
-                parentId: coordinatorId,
-                name: fieldName,
-              });
-
-              console.log('📄 Presign field object:', JSON.stringify(fieldObj, null, 2));
-
-              // Try to extract presign ID
-              const fieldContent = (fieldObj.data?.content as any)?.fields;
-              presignId = fieldContent?.presign_id || fieldContent?.id?.id || fieldContent?.value;
-
-              if (presignId) {
-                console.log('✅ Found presign ID in coordinator dynamic field:', presignId);
-                break;
-              }
-            }
-          }
-        }
-      } catch (err) {
-        console.warn('Could not query coordinator dynamic fields:', err);
-      }
+  if (encShare) {
+    // A share that never reached KeyHolderSigned cannot authorise a signature; catching it here gives a
+    // clear message instead of an opaque MPC failure minutes later.
+    const state = encShare.state as { KeyHolderSigned?: { user_output_signature?: unknown } };
+    if (!state.KeyHolderSigned) {
+      throw new Error(
+        `Encrypted user share is not in KeyHolderSigned state (got ${Object.keys(encShare.state)[0]}). ` +
+          `Please recreate your dWallet.`
+      );
     }
+    if (!state.KeyHolderSigned.user_output_signature) {
+      throw new Error('User output signature is missing from the encrypted share. Please recreate your dWallet.');
+    }
+  } else if (!meta.isShared && !meta.isImportedKey) {
+    console.warn('⚠️ No encrypted user share found — signing may fail.');
   }
+  const encryptedUserSecretKeyShare = encShare;
 
-  if (!presignId) {
-    console.error('❌ Could not find presign session ID');
-    console.error('Available object changes:', JSON.stringify(txDetails.objectChanges, null, 2));
-    console.error('Available effects:', JSON.stringify(txDetails.effects, null, 2));
-    throw new Error('Presign session ID not found in transaction');
-  }
+  /**
+   * === 2PC-MPC v4: take a presignature from the standing pool ===
+   *
+   * `takeReady` is synchronous and returns only *settled* presignatures, so the common path costs
+   * nothing at all. The previous code awaited a warm-up that was usually still in flight, which meant
+   * paying the full ~15s presign leg while logging "using pre-warmed presignature" — the bulk of the
+   * near-minute sends. See lib/ika/presignPool.ts.
+   */
+  const poolParams = {
+    suiClient: params.suiClient,
+    owner: suiAddress,
+    curve,
+    signatureAlgorithm,
+    dwalletNetworkEncryptionKeyId: meta.networkEncryptionKeyId,
+    dWallet,
+    signAndExecuteAsync: (input: { transaction: Transaction }) =>
+      params.signAndExecuteTransaction({
+        transaction: input.transaction,
+        options: { showEffects: true, showEvents: true, showObjectChanges: true },
+      }),
+  };
 
-  console.log('✅ Presign session ID:', presignId);
+  let completedPresign: Awaited<ReturnType<typeof ikaClient.getPresignInParticularState>>;
+  const presignWait = performance.now();
+  const banked = takeReady(suiAddress, curve, signatureAlgorithm);
 
-  // === STEP 2: Poll for Presign Completion ===
-  console.log('2️⃣ Waiting for presign to complete...');
-
-  const completedPresign = await ikaClient.getPresignInParticularState(
-    presignId,
-    'Completed',
-    { timeout: 60000, interval: 2000 }
-  );
-
-  console.log('✅ Presign completed');
-
-  // === STEP 2.5: Build Unsigned Transaction (Get Fresh Blockhash!) ===
-  // Build transaction NOW (after presign) to get the freshest possible blockhash
-  // This minimizes the time between blockhash fetch and broadcast
-  console.log('2️⃣.5 Building unsigned transaction with FRESH blockhash...');
-  console.log('⏰ Timing: Presign completed, now getting blockhash to maximize validity window');
-
-  const { messageBytes, unsignedTx } = await buildUnsignedTransaction(
-    params.chain,
-    params.recipient,
-    params.amount,
-    fromAddress,
-    publicKeyHex // Pass public key for chains that need it (like Cardano)
-  );
-
-  // Track when blockhash was fetched for Solana
-  const blockhashFetchTime = Date.now();
-  console.log('✅ Transaction built with fresh blockhash');
-  console.log('⏰ Time remaining until expiration: ~150 seconds from now');
-  console.log('⏱️  Blockhash fetched at:', new Date().toISOString());
-
-  // === STEP 3: Sign the Message ===
-  console.log('3️⃣ Requesting signature...');
-  console.log('⏰ Starting signature process - this will take 30-50 seconds with dWallet');
-
-  // For zero-trust dWallets, we need either:
-  // 1. encryptedUserSecretKeyShare + decrypt it, OR
-  // 2. secretShare + publicOutput directly
-  // We'll use option 2 - decrypt the share locally using userShareEncryptionKeys
-
-  // CRITICAL: Store the encrypted share to pass directly to requestSign
-  // DO NOT decrypt it - the MPC protocol needs the encrypted version
-  let encryptedUserSecretKeyShare: any = undefined;
-
-  const dWalletKindFromState = (dWallet as any).kind;
-  console.log('🔑 dWallet kind from state:', dWalletKindFromState);
-  console.log('🔍 Full dWallet object:', JSON.stringify(dWallet, null, 2));
-
-  // Check if this is an imported-key dWallet
-  const isImportedKey = (dWallet as any).is_imported_key_dwallet === true;
-  console.log('🔑 Is imported-key dWallet:', isImportedKey);
-
-  // Check if this dWallet has public_user_secret_key_share (shared dWallet)
-  // IMPORTANT: Must check for non-null value, not just !== undefined
-  const publicShareValue = (dWallet as any).public_user_secret_key_share;
-  const hasPublicShare = publicShareValue !== undefined && publicShareValue !== null;
-  console.log('📝 Has public share:', hasPublicShare, 'value:', publicShareValue);
-
-  if (dWalletKindFromState === 'shared' || hasPublicShare) {
-    console.log('📝 This is a SHARED dWallet - no encrypted share needed!');
-    // For shared dWallets, the share is public on-chain
-    // We don't need to decrypt anything - the SDK will use the public share
+  if (banked) {
+    console.log('1️⃣ Presignature ready from the pool (v4, zero wait)');
+    completedPresign = banked.presign as typeof completedPresign;
+    T.note('presign (from pool)', performance.now() - presignWait);
   } else {
-    // Zero-trust dWallet - fetch the ENCRYPTED share (don't decrypt it!)
-    console.log('🔓 Fetching encrypted user share for zero-trust dWallet...');
-
-    try {
-      // If we have the encrypted share ID, fetch it (DO NOT DECRYPT)
-      if (params.encryptedShareId) {
-        console.log('Fetching encrypted share:', params.encryptedShareId);
-        encryptedUserSecretKeyShare = await ikaClient.getEncryptedUserSecretKeyShare(
-          params.encryptedShareId
-        );
-
-        // Verify it's in KeyHolderSigned state
-        if (!encryptedUserSecretKeyShare.state.KeyHolderSigned) {
-          console.error('Encrypted share state:', JSON.stringify(encryptedUserSecretKeyShare.state, null, 2));
-          throw new Error(`Encrypted user share is not in KeyHolderSigned state. Current state: ${Object.keys(encryptedUserSecretKeyShare.state)[0]}. Please recreate your dWallet.`);
-        }
-
-        if (!encryptedUserSecretKeyShare.state.KeyHolderSigned.user_output_signature) {
-          throw new Error('User output signature is missing from KeyHolderSigned state. Please recreate your dWallet.');
-        }
-
-        console.log('✅ Encrypted user share loaded and verified (KeyHolderSigned)');
-      } else {
-        // Try to find the encrypted share from the dWallet's encrypted_user_secret_key_shares Table
-        console.log('🔍 Finding encrypted share from dWallet Table...');
-
-        try {
-          // The encrypted_user_secret_key_shares is a Table object
-          const tableId = (dWallet as any).encrypted_user_secret_key_shares?.id?.id;
-
-          if (tableId) {
-            console.log('📋 Table ID:', tableId);
-
-            // Query the table's dynamic fields to get the encrypted share
-            const dynamicFields = await params.suiClient.getDynamicFields({
-              parentId: tableId,
-            });
-
-            console.log('🔍 Found dynamic fields:', dynamicFields.data.length);
-
-            if (dynamicFields.data.length > 0) {
-              // Get the first dynamic field (should be the encrypted share)
-              const firstField = dynamicFields.data[0];
-              console.log('📄 First field name:', firstField.name);
-
-              const fieldObject = await params.suiClient.getDynamicFieldObject({
-                parentId: tableId,
-                name: firstField.name,
-              });
-
-              console.log('📦 Field object type:', fieldObject.data?.type);
-
-              let encryptedShareId: string | undefined;
-
-              // The field object IS the EncryptedUserSecretKeyShare object
-              // Extract the object ID directly
-              if (fieldObject.data?.objectId) {
-                encryptedShareId = fieldObject.data.objectId;
-                console.log('✅ Found encrypted share object ID:', encryptedShareId);
-              } else {
-                console.warn('⚠️ Could not extract objectId from field object');
-              }
-
-              if (encryptedShareId) {
-                console.log('✅ Found encrypted share ID:', encryptedShareId);
-
-                encryptedUserSecretKeyShare = await ikaClient.getEncryptedUserSecretKeyShare(
-                  encryptedShareId
-                );
-
-                // Verify it's in KeyHolderSigned state
-                if (!encryptedUserSecretKeyShare.state.KeyHolderSigned) {
-                  console.error('Encrypted share state:', JSON.stringify(encryptedUserSecretKeyShare.state, null, 2));
-                  throw new Error(`Encrypted user share is not in KeyHolderSigned state. Current state: ${Object.keys(encryptedUserSecretKeyShare.state)[0]}. Please recreate your dWallet.`);
-                }
-
-                if (!encryptedUserSecretKeyShare.state.KeyHolderSigned.user_output_signature) {
-                  throw new Error('User output signature is missing from KeyHolderSigned state. Please recreate your dWallet.');
-                }
-
-                console.log('✅ Encrypted user share loaded and verified (KeyHolderSigned)');
-              }
-            }
-          } else {
-            console.warn('⚠️ No encrypted_user_secret_key_shares table found in dWallet');
-          }
-        } catch (searchErr) {
-          console.error('Failed to query encrypted share table:', searchErr);
-        }
-
-        if (!encryptedUserSecretKeyShare) {
-          console.warn('⚠️ Could not find encrypted share - signing may fail');
-        }
-      }
-    } catch (err) {
-      console.error('Failed to fetch user share:', err);
-      throw new Error('Cannot sign without user share. Please ensure your dWallet is properly activated.');
-    }
+    // Nothing banked. Joining a purchase already in flight beats starting another — same cost, head
+    // start — and otherwise we buy one now.
+    const inflight = pendingPresign(suiAddress, curve, signatureAlgorithm);
+    console.log(
+      inflight
+        ? '1️⃣ Joining a presignature purchase already in flight…'
+        : '1️⃣ No banked presignature — buying one now (this is the slow path)…'
+    );
+    const acquired = await T.step('presign (bought inline)', async () => {
+      if (inflight) return inflight;
+      await primePresignPool(poolParams);
+      const now = takeReady(suiAddress, curve, signatureAlgorithm);
+      if (!now) throw new Error('Presignature purchase reported success but nothing was banked.');
+      return now;
+    });
+    completedPresign = acquired.presign as typeof completedPresign;
   }
+
+  /**
+   * Rebuild the transaction if acquiring the presignature took long enough to age the blockhash.
+   *
+   * Solana blockhashes expire after ~150s and EVM nonces can be taken by another transaction, so a
+   * payload built before a slow presignature purchase may be stale by the time it is signed. In the
+   * pooled path this never fires; in the slow path it costs one extra build rather than a failed send.
+   */
+  const STALE_BUILD_MS = 5_000;
+  const presignElapsed = performance.now() - presignWait;
+  if (presignElapsed > STALE_BUILD_MS) {
+    const rebuilt = await T.step('rebuild tx (stale blockhash)', () =>
+      buildUnsignedTransaction(params.chain, params.recipient, params.amount, fromAddress, publicKeyHex)
+    );
+    messageBytes = rebuilt.messageBytes;
+    unsignedTx = rebuilt.unsignedTx;
+  }
+
+  const blockhashFetchTime = Date.now();
+
+  console.log('2️⃣ Requesting signature…');
 
   const signTx = new Transaction();
   const signIkaTx = new IkaTransaction({
@@ -659,13 +278,25 @@ export async function signWithDWallet(
     userShareEncryptionKeys,
   });
 
-  // Get fresh IKA coin for sign transaction
-  const ikaCoins2 = await params.suiClient.getCoins({
-    owner: params.userAccount.address,
-    coinType: `${ikaClient.ikaConfig.packages.ikaPackage}::ika::IKA`,
-  });
+  // Fresh fee coin for the sign transaction (same address-balance-safe path as the presign).
+  signTx.setSender(params.userAccount.address);
+  const signFee = await T.step('IKA fee coin', () =>
+    prepareIkaFeeCoin({
+      tx: signTx,
+      suiClient: params.suiClient,
+      owner: params.userAccount.address,
+    })
+  );
+  const ikaCoin2 = signFee.coin;
 
-  const ikaCoin2 = signTx.object(ikaCoins2.data[0].coinObjectId);
+  /**
+   * Everything below until the submit is client-side wasm, and it was completely untimed.
+   *
+   * A real send reported 33.6s wall clock against 14.6s of measured phases — a 19s hole, all of it here.
+   * `requestSign` decrypts the user's key share with class-groups crypto and computes the client's share
+   * of the signature, and the decryption half of that is by far the more expensive.
+   */
+  const wasmStart = performance.now();
 
   // Verify presign capability
   const verifiedPresignCap = signIkaTx.verifyPresignCap({
@@ -716,49 +347,77 @@ export async function signWithDWallet(
       suiCoin: signTx.gas,
     };
 
-    // CRITICAL: Add encryptedUserSecretKeyShare directly (DO NOT decrypt it!)
-    // The MPC protocol requires the encrypted version, not the decrypted share
-    if (encryptedUserSecretKeyShare) {
+    /**
+     * Prefer an already-decrypted share.
+     *
+     * Decrypting the user's key share is the single most expensive step in a send (~19s measured, and it
+     * was invisible until the phase table exposed the gap). It depends only on the dWallet and the
+     * encrypted share, never on the message, so the send dialog decrypts it while the user types. See
+     * lib/ika/userShare.ts, including why passing `secretShare` here loses none of the SDK's verification.
+     *
+     * If it isn't ready, fall back to handing over the encrypted share and letting `requestSign` decrypt
+     * internally — the previous behaviour, just slower.
+     */
+    const predecrypted = params.encryptedShareId
+      ? peekUserShare(params.dwalletId, params.encryptedShareId)
+      : meta.encryptedShareId
+        ? peekUserShare(params.dwalletId, meta.encryptedShareId)
+        : undefined;
+
+    if (predecrypted) {
+      requestSignParams.secretShare = predecrypted.secretShare;
+      requestSignParams.publicOutput = predecrypted.publicOutput;
+      console.log('🔓 Using pre-decrypted key share (off the critical path)');
+    } else if (encryptedUserSecretKeyShare) {
       requestSignParams.encryptedUserSecretKeyShare = encryptedUserSecretKeyShare;
-      console.log('📝 Using encrypted user secret key share (NOT decrypted)');
+      debug('📝 Decrypting the user share inline (not pre-decrypted)');
     }
 
     await signIkaTx.requestSign(requestSignParams);
   }
 
+  T.note('sign request (client wasm)', performance.now() - wasmStart);
+
   // Set higher gas budget for sign transaction (MPC computation is expensive)
-  signTx.setGasBudget(500000000); // 500M MIST = 0.5 SUI
+  signFee.settle();
+  /**
+   * No explicit gas budget.
+   *
+   * This used to hardcode 0.5 SUI. A gas budget is *reserved*, not just spent, so Sui rejects the
+   * transaction outright when the budget exceeds the balance — "Balance of gas object … is lower than
+   * the needed amount: 500000000" — even though the transaction actually costs ~0.02 SUI. Any fixed
+   * number is wrong in both directions: too high and it fails on a modest balance, too low and it
+   * fails on a busy epoch. Omitting it makes the SDK dry-run and use the real estimate.
+   */
 
   // Execute sign transaction
-  console.log('⏳ Executing sign transaction with Sui wallet...');
-  const signTxResult = await params.signAndExecuteTransaction({
-    transaction: signTx,
-    options: {
-      showEffects: true,
-      showEvents: true,
-      showObjectChanges: true,
-    },
-  });
+  debug('⏳ Executing sign transaction with Sui wallet...');
+  const signTxResult = await T.step('sign tx (zkLogin submit)', () =>
+    params.signAndExecuteTransaction({
+      transaction: signTx,
+      options: { showEffects: true, showEvents: true, showObjectChanges: true },
+    })
+  );
 
-  console.log('✅ Sign transaction executed');
-  console.log('📝 Transaction digest:', signTxResult.digest);
+  debug('✅ Sign transaction executed');
+  debug('📝 Transaction digest:', signTxResult.digest);
 
-  // The transaction was executed, but we need to wait for it to be indexed
-  // before querying it to get full details
-  console.log('⏳ Waiting for transaction to be indexed...');
-  await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds
-
-  console.log('🔍 Querying sign transaction details from blockchain...');
-  const signTxDetails = await params.suiClient.getTransactionBlock({
-    digest: signTxResult.digest,
-    options: {
-      showEffects: true,
-      showEvents: true,
-      showObjectChanges: true,
-    },
-  });
-
-  console.log('📋 Full sign transaction details retrieved');
+  /**
+   * Read the outcome from execution itself rather than fetching it again.
+   *
+   * This used to call `waitForTransaction`, which not only costs a round-trip but has to wait for the
+   * fullnode to *index* the transaction — around a second of dead time, paid on every send, for data
+   * execution had already computed. The executing endpoint now returns effects, events and object
+   * changes directly; the fetch remains only as a fallback for a signer that doesn't supply them.
+   */
+  const signTxDetails = signTxResult.effects
+    ? signTxResult
+    : await T.step('fetch sign effects (fallback)', () =>
+        params.suiClient.waitForTransaction({
+          digest: signTxResult.digest,
+          options: { showEffects: true, showEvents: true, showObjectChanges: true },
+        })
+      );
 
   // Check if transaction succeeded
   if (signTxDetails.effects?.status?.status !== 'success') {
@@ -776,12 +435,12 @@ export async function signWithDWallet(
     throw new Error(`Sign transaction failed: ${error}`);
   }
 
-  console.log('✅ Sign transaction succeeded');
+  debug('✅ Sign transaction succeeded');
 
   // Extract sign session ID from events or object changes
-  console.log('🔍 Extracting sign session ID...');
-  console.log('Events:', signTxDetails.events);
-  console.log('Object changes:', signTxDetails.objectChanges);
+  debug('🔍 Extracting sign session ID...');
+  debug('Events:', signTxDetails.events);
+  debug('Object changes:', signTxDetails.objectChanges);
 
   let signId: string | undefined;
 
@@ -791,7 +450,7 @@ export async function signWithDWallet(
   );
 
   if (signEvent) {
-    console.log('📋 Found sign event:', signEvent);
+    debug('📋 Found sign event:', signEvent);
     const parsedJson = signEvent.parsedJson as any;
     signId = parsedJson?.sign_id ||
              parsedJson?.event_data?.sign_id ||
@@ -800,7 +459,7 @@ export async function signWithDWallet(
 
   // If not found in events, try object changes (similar to presign)
   if (!signId) {
-    console.log('⚠️ Sign event not found, checking object changes...');
+    debug('⚠️ Sign event not found, checking object changes...');
     const signSessionObject = signTxDetails.objectChanges?.find((change: any) => {
       if (change.type === 'created') {
         const objType = change.objectType || '';
@@ -810,7 +469,7 @@ export async function signWithDWallet(
     });
 
     if (signSessionObject) {
-      console.log('📋 Found sign session object:', signSessionObject);
+      debug('📋 Found sign session object:', signSessionObject);
       signId = (signSessionObject as any).objectId;
     }
   }
@@ -821,18 +480,25 @@ export async function signWithDWallet(
     throw new Error('Sign session ID not found in transaction result');
   }
 
-  console.log('✅ Sign request submitted:', signId);
+  debug('✅ Sign request submitted:', signId);
 
   // === STEP 4: Poll for Signature Completion ===
-  console.log('4️⃣ Waiting for signature to complete...');
+  // With a pooled presign this is the single online round the v4 upgrade reduced to ~400ms, so a
+  // 2s poll interval could more than triple the observed signing latency on its own.
+  console.log('3️⃣ Waiting for the MPC signature…');
 
-  const completedSign = await ikaClient.getSignInParticularState(
-    signId,
-    curve,
-    signatureAlgorithm,
-    'Completed',
-    { timeout: 60000, interval: 2000 }
+  const completedSign = await T.step('MPC sign round', () =>
+    ikaClient.getSignInParticularState(signId, curve, signatureAlgorithm, 'Completed', MPC_POLL)
   );
+
+  /**
+   * Bank the next presignature now, in the background.
+   *
+   * The one we just consumed is gone, so without this the *next* send would fall back to the slow path.
+   * Refilling immediately after use — rather than when the next send starts — is what makes the pooled
+   * path the steady state rather than a one-off.
+   */
+  refillInBackground(poolParams);
 
   // Extract signature
   const signature = Uint8Array.from(completedSign.state.Completed?.signature ?? []);
@@ -841,23 +507,22 @@ export async function signWithDWallet(
   // Calculate time elapsed for Solana
   const signingTimeElapsed = Date.now() - blockhashFetchTime;
   console.log('✅ Signature received:', signatureHex.substring(0, 20) + '...');
-  console.log(`⏱️  Signing took ${(signingTimeElapsed / 1000).toFixed(1)} seconds`);
-  console.log(`⏰ Time remaining until blockhash expiration: ~${Math.max(0, 150 - signingTimeElapsed / 1000).toFixed(0)} seconds`);
+  debug(`⏱️  Signing took ${(signingTimeElapsed / 1000).toFixed(1)} seconds`);
+  debug(`⏰ Time remaining until blockhash expiration: ~${Math.max(0, 150 - signingTimeElapsed / 1000).toFixed(0)} seconds`);
 
   // === STEP 5: Construct Signed Transaction ===
-  console.log('5️⃣ Constructing signed transaction...');
+  console.log('4️⃣ Constructing signed transaction…');
 
   let serialized: string;
   let hash: string;
 
   if (params.chain === 'Bitcoin') {
-    // For Bitcoin, attach public key to unsignedTx for scriptSig construction
-    unsignedTx.publicKey = publicKeyHex;
-
-    // Use the chain signer's broadcast method
+    // Taproot: the witness is the bare 64-byte Schnorr signature. No recovery id (that's an ECDSA
+    // concept), no public key in the witness (it IS the output key), no scriptSig. The signer
+    // already carries everything else it needs in `unsignedTx`.
     const signer = getChainSigner(params.chain);
-    const result = await signer.broadcastTransaction(unsignedTx, signature, 0);
-
+    const result = await T.step('broadcast', () => signer.broadcastTransaction(unsignedTx, signature));
+    T.report();
     return result;
   } else if (params.chain === 'Solana') {
     // For Solana, attach EdDSA signature to transaction
@@ -881,56 +546,56 @@ export async function signWithDWallet(
     (params as any).originalBlockhash = unsignedTx.blockhash;
     (params as any).originalLastValidBlockHeight = unsignedTx.lastValidBlockHeight;
 
-    console.log('');
-    console.log('═══════════════════════════════════════════════════════');
-    console.log('🎉 SOLANA TRANSACTION SIGNED SUCCESSFULLY!');
-    console.log('═══════════════════════════════════════════════════════');
-    console.log('Transaction ID:', hash);
-    console.log('');
-    console.log('📝 SIGNED TRANSACTION (base64, ready to broadcast):');
-    console.log(serialized);
-    console.log('');
-    console.log('You can broadcast this via Solana RPC sendTransaction');
-    console.log('═══════════════════════════════════════════════════════');
-    console.log('');
+    debug('');
+    debug('═══════════════════════════════════════════════════════');
+    debug('🎉 SOLANA TRANSACTION SIGNED SUCCESSFULLY!');
+    debug('═══════════════════════════════════════════════════════');
+    debug('Transaction ID:', hash);
+    debug('');
+    debug('📝 SIGNED TRANSACTION (base64, ready to broadcast):');
+    debug(serialized);
+    debug('');
+    debug('You can broadcast this via Solana RPC sendTransaction');
+    debug('═══════════════════════════════════════════════════════');
+    debug('');
   } else if (params.chain === 'Polkadot') {
     // For Polkadot, use the chain signer's broadcast method
-    console.log('🔐 Processing ED25519 signature for Polkadot transaction...');
+    debug('🔐 Processing ED25519 signature for Polkadot transaction...');
 
     const signer = getChainSigner(params.chain);
-    const result = await signer.broadcastTransaction(unsignedTx, signature);
-
+    const result = await T.step('broadcast', () => signer.broadcastTransaction(unsignedTx, signature));
+    T.report();
     return result;
   } else if (params.chain === 'Cardano') {
     // For Cardano, use the chain signer's broadcast method
-    console.log('🔐 Processing ED25519 signature for Cardano transaction...');
+    debug('🔐 Processing ED25519 signature for Cardano transaction...');
 
     const signer = getChainSigner(params.chain);
-    const result = await signer.broadcastTransaction(unsignedTx, signature);
-
+    const result = await T.step('broadcast', () => signer.broadcastTransaction(unsignedTx, signature));
+    T.report();
     return result;
   } else if (params.chain === 'NEAR') {
     // For NEAR, use the chain signer's broadcast method
-    console.log('🔐 Processing ED25519 signature for NEAR transaction...');
+    debug('🔐 Processing ED25519 signature for NEAR transaction...');
 
     const signer = getChainSigner(params.chain);
-    const result = await signer.broadcastTransaction(unsignedTx, signature);
-
+    const result = await T.step('broadcast', () => signer.broadcastTransaction(unsignedTx, signature));
+    T.report();
     return result;
   } else {
     // For EVM chains, attach ECDSA signature to transaction
     // ECDSA signatures need the correct recovery value (yParity) to derive the correct address
 
-    console.log('🔐 Processing ECDSA signature for EVM transaction...');
-    console.log('📋 Expected sender address:', fromAddress);
-    console.log('📋 Signature hex:', signatureHex);
-    console.log('📋 Signature length:', signatureHex.length - 2, 'bytes');
+    debug('🔐 Processing ECDSA signature for EVM transaction...');
+    debug('📋 Expected sender address:', fromAddress);
+    debug('📋 Signature hex:', signatureHex);
+    debug('📋 Signature length:', signatureHex.length - 2, 'bytes');
 
     // Extract r and s from signature (64 bytes total: 32 for r, 32 for s)
     let r = '0x' + signatureHex.slice(2, 66);
     let s = '0x' + signatureHex.slice(66, 130);
-    console.log('📋 Raw r:', r);
-    console.log('📋 Raw s:', s);
+    debug('📋 Raw r:', r);
+    debug('📋 Raw s:', s);
 
     // CRITICAL: Normalize s to lower half (EIP-2: s must be in lower half of curve order)
     // This is required for signature malleability protection
@@ -941,20 +606,20 @@ export async function signWithDWallet(
     let recoveryOffset = 0;
 
     if (sBigInt > secp256k1HalfN) {
-      console.log('⚠️  s value is in upper half, normalizing...');
+      debug('⚠️  s value is in upper half, normalizing...');
       sBigInt = secp256k1N - sBigInt;
       s = '0x' + sBigInt.toString(16).padStart(64, '0');
       recoveryOffset = 1; // If we flipped s, we also need to flip v
-      console.log('✅ Normalized s:', s);
+      debug('✅ Normalized s:', s);
     } else {
-      console.log('✅ s value is already in lower half (normalized)');
+      debug('✅ s value is already in lower half (normalized)');
     }
 
-    console.log('');
-    console.log('🔍 Testing recovery values to find correct signature...');
-    console.log('📋 Expected address from public_output:', fromAddress);
-    console.log('📋 Recovery offset:', recoveryOffset);
-    console.log('');
+    debug('');
+    debug('🔍 Testing recovery values to find correct signature...');
+    debug('📋 Expected address from public_output:', fromAddress);
+    debug('📋 Recovery offset:', recoveryOffset);
+    debug('');
 
     // Try both v values with proper recovery offset handling
     let signedTx: any = null;
@@ -971,11 +636,11 @@ export async function signWithDWallet(
       testTx.signature = ethers.Signature.from({ r, s, v: eip155V });
 
       const recoveredFrom = testTx.from;
-      console.log(`🔍 Testing baseV=${baseV}, v=${v}, eip155V=${eip155V}, recovered: ${recoveredFrom}`);
+      debug(`🔍 Testing baseV=${baseV}, v=${v}, eip155V=${eip155V}, recovered: ${recoveredFrom}`);
 
       // Check if this v value recovers to the expected address
       if (recoveredFrom?.toLowerCase() === fromAddress.toLowerCase()) {
-        console.log(`✅ Found correct recovery id (v): ${v} (EIP-155 v: ${eip155V})`);
+        debug(`✅ Found correct recovery id (v): ${v} (EIP-155 v: ${eip155V})`);
         signedTx = testTx;
         actualSenderAddress = recoveredFrom;
         matchedV = eip155V;
@@ -985,7 +650,7 @@ export async function signWithDWallet(
 
     // If no match found, try all 4 combinations as last resort
     if (!signedTx) {
-      console.log('⚠️  Standard recovery failed, trying all v combinations...');
+      debug('⚠️  Standard recovery failed, trying all v combinations...');
       let foundV: number | null = null;
       let foundAddress: string | null = null;
 
@@ -997,7 +662,7 @@ export async function signWithDWallet(
           testTx.signature = ethers.Signature.from({ r, s, v });
 
           const recoveredFrom = testTx.from;
-          console.log(`🔍 Trying v=${v}, recovered: ${recoveredFrom}`);
+          debug(`🔍 Trying v=${v}, recovered: ${recoveredFrom}`);
 
           if (recoveredFrom?.toLowerCase() === fromAddress.toLowerCase()) {
             signedTx = testTx;
@@ -1005,7 +670,7 @@ export async function signWithDWallet(
             foundAddress = recoveredFrom;
             actualSenderAddress = recoveredFrom;
             matchedV = v;
-            console.log(`✅ Found working v: ${v}`);
+            debug(`✅ Found working v: ${v}`);
             break;
           } else if (foundV === null) {
             // Keep track of the first valid signature for fallback
@@ -1029,57 +694,58 @@ export async function signWithDWallet(
         actualSenderAddress = foundAddress;
         matchedV = foundV;
 
-        console.log('');
-        console.log('❌ CRITICAL: Address mismatch detected!');
-        console.log(`   Transaction built for: ${fromAddress}`);
-        console.log(`   Signature recovers to: ${foundAddress}`);
-        console.log('');
-        console.log('⚠️  The transaction nonce may be incorrect for this address!');
-        console.log('💡 You should fund the recovered address and use it instead.');
+        debug('');
+        debug('❌ CRITICAL: Address mismatch detected!');
+        debug(`   Transaction built for: ${fromAddress}`);
+        debug(`   Signature recovers to: ${foundAddress}`);
+        debug('');
+        debug('⚠️  The transaction nonce may be incorrect for this address!');
+        debug('💡 You should fund the recovered address and use it instead.');
       }
     }
 
-    console.log('');
-    console.log('═══════════════════════════════════════════════════════');
-    console.log('✅ SIGNATURE VERIFICATION');
-    console.log('═══════════════════════════════════════════════════════');
-    console.log('📋 Transaction will be sent from:', actualSenderAddress);
-    console.log('📋 Expected address from public_output:', fromAddress);
-    console.log('📋 Used recovery value (v):', matchedV);
+    debug('');
+    debug('═══════════════════════════════════════════════════════');
+    debug('✅ SIGNATURE VERIFICATION');
+    debug('═══════════════════════════════════════════════════════');
+    debug('📋 Transaction will be sent from:', actualSenderAddress);
+    debug('📋 Expected address from public_output:', fromAddress);
+    debug('📋 Used recovery value (v):', matchedV);
     if (actualSenderAddress?.toLowerCase() === fromAddress.toLowerCase()) {
-      console.log('');
-      console.log('✅ SUCCESS: Signature recovers to expected address!');
-      console.log('💚 The transaction will be sent from the correct dWallet address.');
+      debug('');
+      debug('✅ SUCCESS: Signature recovers to expected address!');
+      debug('💚 The transaction will be sent from the correct dWallet address.');
     } else {
-      console.log('');
-      console.log('⚠️  WARNING: These addresses DO NOT MATCH!');
-      console.log('❌ Signature recovery failed - transaction may be rejected.');
-      console.log('💰 Make sure to fund the ACTUAL sender address above!');
+      debug('');
+      debug('⚠️  WARNING: These addresses DO NOT MATCH!');
+      debug('❌ Signature recovery failed - transaction may be rejected.');
+      debug('💰 Make sure to fund the ACTUAL sender address above!');
     }
-    console.log('═══════════════════════════════════════════════════════');
-    console.log('');
+    debug('═══════════════════════════════════════════════════════');
+    debug('');
 
     const finalTx = signedTx;
 
     serialized = finalTx.serialized;
     hash = finalTx.hash || '0x';
 
-    console.log('');
-    console.log('═══════════════════════════════════════════════════════');
-    console.log('🎉 TRANSACTION SIGNED SUCCESSFULLY!');
-    console.log('═══════════════════════════════════════════════════════');
-    console.log('Transaction Hash:', hash);
-    console.log('Sender Address:', finalTx.from);
-    console.log('');
-    console.log('📝 FULL SIGNED TRANSACTION (ready to broadcast):');
-    console.log(serialized);
-    console.log('');
-    console.log('You can broadcast this manually at:');
-    console.log('https://sepolia.etherscan.io/pushTx');
-    console.log('═══════════════════════════════════════════════════════');
-    console.log('');
+    debug('');
+    debug('═══════════════════════════════════════════════════════');
+    debug('🎉 TRANSACTION SIGNED SUCCESSFULLY!');
+    debug('═══════════════════════════════════════════════════════');
+    debug('Transaction Hash:', hash);
+    debug('Sender Address:', finalTx.from);
+    debug('');
+    debug('📝 FULL SIGNED TRANSACTION (ready to broadcast):');
+    debug(serialized);
+    debug('');
+    debug('You can broadcast this manually at:');
+    debug('https://etherscan.io/pushTx');
+    debug('═══════════════════════════════════════════════════════');
+    debug('');
   }
 
+  T.report();
   return {
     signature: signatureHex,
     hash,
@@ -1105,7 +771,7 @@ export async function broadcastTransaction(
     const txHex = serialized;
 
     try {
-      const response = await fetch('https://blockstream.info/testnet/api/tx', {
+      const response = await fetch(`${MAINNET_CHAINS.Bitcoin.rpcUrl}/tx`, {
         method: 'POST',
         headers: {
           'Content-Type': 'text/plain',
@@ -1120,9 +786,9 @@ export async function broadcastTransaction(
 
       const txHash = await response.text(); // Blockstream returns just the txid
 
-      console.log('✅ Bitcoin transaction broadcasted!');
-      console.log('🔗 TX Hash:', txHash);
-      console.log('📋 Explorer:', `https://blockstream.info/testnet/tx/${txHash}`);
+      debug('✅ Bitcoin transaction broadcasted!');
+      debug('🔗 TX Hash:', txHash);
+      debug('📋 Explorer:', txExplorerUrl('Bitcoin', txHash));
 
       return { txHash };
     } catch (error) {
@@ -1130,8 +796,8 @@ export async function broadcastTransaction(
       throw error;
     }
   } else if (chain === 'Solana') {
-    // Broadcast Solana transaction
-    const connection = new Connection(clusterApiUrl('testnet'), 'confirmed');
+    // Broadcast Solana transaction (mainnet-beta)
+    const connection = new Connection(SOLANA_MAINNET.rpcUrl, 'confirmed');
 
     console.log('📡 Broadcasting Solana transaction...');
 
@@ -1141,7 +807,7 @@ export async function broadcastTransaction(
 
     try {
       // Try to send with the original blockhash first
-      console.log('📤 Attempting to send with original blockhash...');
+      debug('📤 Attempting to send with original blockhash...');
       txSignature = await connection.sendRawTransaction(txBuffer, {
         skipPreflight: false,
         preflightCommitment: 'confirmed',
@@ -1150,8 +816,8 @@ export async function broadcastTransaction(
       // If blockhash is not found, skip preflight and send anyway
       // The signature is still valid, but preflight simulation fails due to expired blockhash
       if (error.message && error.message.includes('Blockhash not found')) {
-        console.log('⚠️ Blockhash expired during signing process');
-        console.log('📤 Retrying with skipPreflight=true (signature is still valid)...');
+        debug('⚠️ Blockhash expired during signing process');
+        debug('📤 Retrying with skipPreflight=true (signature is still valid)...');
 
         // Retry sending but skip the preflight check
         // The transaction is still valid, just the blockhash expired during the signing delay
@@ -1160,7 +826,7 @@ export async function broadcastTransaction(
           preflightCommitment: 'confirmed',
         });
 
-        console.log('✅ Transaction submitted successfully (preflight skipped)');
+        debug('✅ Transaction submitted successfully (preflight skipped)');
       } else {
         // Re-throw if it's a different error
         throw error;
@@ -1169,48 +835,36 @@ export async function broadcastTransaction(
 
     const signature = txSignature;
 
-    console.log('✅ Transaction broadcasted:', signature);
-    console.log('📋 Solana Explorer:', `https://explorer.solana.com/tx/${signature}?cluster=testnet`);
+    console.log('✅ Transaction submitted:', signature);
+    debug('📋 Solana Explorer:', txExplorerUrl('Solana', signature));
 
-    // Wait for confirmation (with extended timeout)
-    console.log('⏳ Waiting for confirmation (may take up to 60 seconds)...');
-
-    try {
-      // Simply wait for confirmation using the signature
-      // Don't pass blockhash since the transaction was already sent
-      const confirmation = await connection.confirmTransaction(signature, 'confirmed');
-
-      if (confirmation.value.err) {
-        console.error('❌ Transaction failed on-chain:', confirmation.value.err);
-        throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
-      }
-
-      console.log('✅ Transaction confirmed on Solana testnet!');
-      console.log('   Signature:', signature);
-    } catch (error: any) {
-      // If confirmation times out, still return the signature
-      // The transaction may still succeed, user can check explorer
-      if (error.message && (error.message.includes('timeout') || error.message.includes('Timeout') || error.name === 'TransactionExpiredTimeoutError')) {
-        console.warn('⚠️ Confirmation timeout - transaction was sent but confirmation timed out');
-        console.warn('📋 The transaction may still succeed. Check Solana Explorer:');
-        console.warn(`   https://explorer.solana.com/tx/${signature}?cluster=testnet`);
-        // Don't throw - return the signature anyway since the transaction was broadcasted
-      } else {
-        throw error;
-      }
-    }
+    /**
+     * Don't block the send on confirmation.
+     *
+     * The transaction is irrevocably submitted the moment the cluster accepts it, and the signature is
+     * final — waiting for `confirmTransaction` adds seconds (occasionally a 30s+ timeout) during which
+     * the user is shown a spinner for work that is already done and cannot be undone. Confirmation is
+     * still tracked, just in the background, so a genuine on-chain failure is reported rather than lost.
+     */
+    void connection
+      .confirmTransaction(signature, 'confirmed')
+      .then((c) =>
+        c.value.err
+          ? console.error('❌ Solana transaction failed on chain:', c.value.err)
+          : console.log('✅ Solana transaction confirmed:', signature)
+      )
+      .catch((e) =>
+        console.warn(
+          `⚠️ Could not confirm ${signature} (it may still succeed): ${(e as Error).message}`
+        )
+      );
 
     return { txHash: signature };
   } else {
-    // Broadcast EVM transaction
-    const chainConfigs: { [key: string]: string } = {
-      'Ethereum': 'https://rpc-sepolia.rockx.com',
-      'Polygon': 'https://rpc-amoy.polygon.technology',
-      'Avalanche': 'https://api.avax-test.network/ext/bc/C/rpc',
-      'BSC': 'https://bsc-testnet-rpc.publicnode.com',
-    };
-
-    const rpcUrl = chainConfigs[chain];
+    // Broadcast EVM transaction. Read the RPC from the shared mainnet config rather than a second
+    // hardcoded list — the two drifting apart is how you sign for one network and broadcast to
+    // another.
+    const rpcUrl = MAINNET_CHAINS[chain]?.rpcUrl;
     if (!rpcUrl) {
       throw new Error(`RPC URL not found for ${chain}`);
     }
@@ -1218,15 +872,27 @@ export async function broadcastTransaction(
     const provider = new ethers.JsonRpcProvider(rpcUrl);
     const txResponse = await provider.broadcastTransaction(serialized);
 
-    console.log('✅ Transaction broadcasted:', txResponse.hash);
+    console.log('✅ Transaction submitted:', txResponse.hash);
 
-    // Wait for confirmation
-    console.log('⏳ Waiting for confirmation...');
-    const receipt = await txResponse.wait();
-
-    console.log('✅ Transaction confirmed!');
-    console.log('   Block:', receipt?.blockNumber);
-    console.log('   Status:', receipt?.status === 1 ? 'Success' : 'Failed');
+    /**
+     * Don't block the send on inclusion.
+     *
+     * `wait()` sits until the transaction is mined — ~12s on Ethereum mainnet — even though the hash is
+     * already final and the user can follow it on an explorer. Since a mined receipt can also report a
+     * reverted transaction, the wait still happens, just off the critical path.
+     */
+    void txResponse
+      .wait()
+      .then((receipt) =>
+        receipt?.status === 1
+          ? console.log(`✅ ${chain} transaction confirmed in block ${receipt.blockNumber}`)
+          : console.error(`❌ ${chain} transaction reverted:`, txResponse.hash)
+      )
+      .catch((e) =>
+        console.warn(
+          `⚠️ Could not confirm ${txResponse.hash} (it may still be mined): ${(e as Error).message}`
+        )
+      );
 
     return { txHash: txResponse.hash };
   }

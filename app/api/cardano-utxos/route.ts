@@ -4,6 +4,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
+import { CARDANO_MAINNET } from '@/lib/config/chains';
 
 export async function GET(request: NextRequest) {
   try {
@@ -18,16 +19,16 @@ export async function GET(request: NextRequest) {
     }
 
     // Validate address format
-    if (!address.startsWith('addr_test')) {
+    if (!address.startsWith(CARDANO_MAINNET.addressPrefix)) {
       return NextResponse.json(
-        { error: 'Invalid Cardano testnet address' },
+        { error: 'Invalid Cardano mainnet address' },
         { status: 400 }
       );
     }
 
     // Fetch UTXOs from Koios API (POST method with address in body)
     const response = await fetch(
-      `https://preview.koios.rest/api/v1/address_utxos`,
+      `${CARDANO_MAINNET.rpcUrl}/address_utxos`,
       {
         method: 'POST',
         headers: {

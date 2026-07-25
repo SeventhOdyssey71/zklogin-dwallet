@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { MAINNET_CHAINS } from '@/lib/config/chains';
 
 /**
- * API route to fetch Bitcoin testnet balance
+ * API route to fetch Bitcoin MAINNET balance
  * Proxies requests to Blockstream API to avoid CORS issues
  */
 export async function GET(request: NextRequest) {
@@ -18,7 +19,7 @@ export async function GET(request: NextRequest) {
 
     // Fetch from Blockstream API
     const response = await fetch(
-      `https://blockstream.info/testnet/api/address/${address}`,
+      `${MAINNET_CHAINS.Bitcoin.rpcUrl}/address/${address}`,
       {
         headers: {
           'Accept': 'application/json',

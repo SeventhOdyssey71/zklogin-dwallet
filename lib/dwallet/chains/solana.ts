@@ -8,9 +8,9 @@ import {
   SystemProgram,
   Transaction as SolanaTransaction,
   LAMPORTS_PER_SOL,
-  clusterApiUrl,
 } from '@solana/web3.js';
 import { ChainSigner, UnsignedTransaction, SignedTransactionResult } from '../core/types';
+import { SOLANA_MAINNET } from '../../config/chains';
 
 /**
  * Solana chain signer
@@ -19,8 +19,8 @@ export class SolanaSigner implements ChainSigner {
   private connection: Connection;
 
   constructor() {
-    // Connect to Solana testnet
-    this.connection = new Connection(clusterApiUrl('testnet'), 'confirmed');
+    // Connect to Solana mainnet-beta (via the shared config so reads/sends can't diverge).
+    this.connection = new Connection(SOLANA_MAINNET.rpcUrl, 'confirmed');
   }
 
   /**
@@ -52,7 +52,7 @@ export class SolanaSigner implements ChainSigner {
     // Warn if insufficient balance
     if (balance < lamports) {
       console.warn(`⚠️ WARNING: Insufficient balance! Have ${balanceSOL} SOL, need ${amount} SOL`);
-      console.warn(`📋 Request testnet SOL from: https://faucet.solana.com/`);
+      console.warn(`📋 This is Solana mainnet — fund ${fromAddress} with real SOL.`);
     }
 
     // Get recent blockhash - fetch as late as possible!

@@ -19,6 +19,16 @@
  */
 
 /**
+ * Verbose derivation logging, off by default — this ran on every balance refresh.
+ * Set NEXT_PUBLIC_DEBUG_BALANCES=1 to re-enable.
+ */
+const VERBOSE = process.env.NEXT_PUBLIC_DEBUG_BALANCES === '1';
+const debug = (...args: unknown[]) => {
+  if (VERBOSE) debug(...args);
+};
+
+
+/**
  * Derive Ethereum-compatible address from SECP256K1 public key
  * Works for: Ethereum, Polygon, Avalanche C-Chain, BSC
  *
@@ -43,13 +53,13 @@ export function deriveEthereumAddress(publicKey: string): string {
       // Compressed public key (33 bytes): [0x02 or 0x03][32-byte x-coordinate]
       // SECP256K1 point compression: 0x02 = even Y, 0x03 = odd Y
       const compressedHex = '0x' + hex;
-      console.log('📝 Compressed SECP256K1 key (33 bytes):', compressedHex);
+      debug('📝 Compressed SECP256K1 key (33 bytes):', compressedHex);
 
       // Decompress: recover the full (x, y) coordinates from just x + parity bit
       // ethers.SigningKey.computePublicKey(key, false) returns:
       // 0x04 + x-coordinate (32 bytes) + y-coordinate (32 bytes) = 65 bytes
       uncompressedPubKey = ethers.SigningKey.computePublicKey(compressedHex, false);
-      console.log('✅ Decompressed to uncompressed format (65 bytes)');
+      debug('✅ Decompressed to uncompressed format (65 bytes)');
     } else if (keyBytes.length === 64) {
       // Uncompressed without 0x04 prefix - add it
       uncompressedPubKey = '0x04' + hex;
@@ -68,44 +78,33 @@ export function deriveEthereumAddress(publicKey: string): string {
     //   4. Apply EIP-55 checksum encoding → final address
     const ethereumAddress = ethers.computeAddress(uncompressedPubKey);
 
-    console.log('✅ Ethereum address derived:', ethereumAddress);
+    debug('✅ Ethereum address derived:', ethereumAddress);
     return ethereumAddress;
   } catch (error) {
-    console.error('❌ Error deriving Ethereum address:', error);
+    console.error('Error deriving Ethereum address:', error);
     return 'Invalid public key';
   }
 }
 
 /**
- * Derive Bitcoin testnet address from SECP256K1 public key
- * Returns P2PKH testnet address (starting with m or n)
+ * Derive the Bitcoin MAINNET **Taproot** address (P2TR, `bc1p…`) from the dWallet's SECP256K1
+ * public key.
+ *
+ * The taproot output key is the dWallet's *x-only* key with **no BIP341 tweak**, because Ika signs
+ * Taproot against `publicKey.slice(1)` and has no way to tweak its secret share — see the long
+ * explanation at the top of `lib/dwallet/chains/bitcoin.ts`. Consensus verifies the signature
+ * against whatever 32 bytes are in the scriptPubKey, so this is valid and spendable.
+ *
+ * Taproot (Schnorr) is also the fast path: it is what 2PC-MPC v4 accelerates, and it always draws
+ * from the v4 presignature pool.
  */
 export function deriveBitcoinAddress(publicKey: string): string {
   try {
-    // Use Node.js crypto for hashing
-    const crypto = require('crypto');
-
-    const hex = publicKey.startsWith('0x') ? publicKey.slice(2) : publicKey;
-    const pubKeyBuffer = Buffer.from(hex, 'hex');
-
-    // Bitcoin testnet P2PKH: version byte 0x6f
-    const sha256Hash = crypto.createHash('sha256').update(pubKeyBuffer).digest();
-    const ripemd160Hash = crypto.createHash('ripemd160').update(sha256Hash).digest();
-
-    // Add testnet version byte (0x6f for P2PKH testnet)
-    const versionedHash = Buffer.concat([Buffer.from([0x6f]), ripemd160Hash]);
-
-    // Double SHA256 for checksum
-    const checksum = crypto.createHash('sha256')
-      .update(crypto.createHash('sha256').update(versionedHash).digest())
-      .digest()
-      .slice(0, 4);
-
-    // Combine and encode to base58
-    const addressBytes = Buffer.concat([versionedHash, checksum]);
-    return base58Encode(addressBytes);
+    // Shared with the signer so the receive address and the spend script can never disagree.
+    const { xOnlyPublicKey, p2trAddress } = require('../dwallet/chains/bitcoin');
+    return p2trAddress(xOnlyPublicKey(publicKey));
   } catch (error) {
-    console.error('Error deriving Bitcoin address:', error);
+    console.error('Error deriving Bitcoin Taproot address:', error);
     return 'Invalid public key';
   }
 }
@@ -144,15 +143,15 @@ export function deriveSolanaAddress(publicKey: string): string {
     const hex = publicKey.startsWith('0x') ? publicKey.slice(2) : publicKey;
     const bytes = Buffer.from(hex, 'hex');
 
-    console.log('🔍 Deriving Solana address from public key:');
-    console.log('   Public key hex:', hex);
-    console.log('   Public key bytes length:', bytes.length);
+    debug('🔍 Deriving Solana address from public key:');
+    debug('   Public key hex:', hex);
+    debug('   Public key bytes length:', bytes.length);
 
     // Solana address is just the base58-encoded public key (32 bytes for ED25519)
     // bs58 might be a default export or have .default property
     const encode = bs58.encode || bs58.default?.encode || bs58.default;
     const address = typeof encode === 'function' ? encode(bytes) : bs58(bytes);
-    console.log('   ✅ Solana address:', address);
+    debug('   ✅ Solana address:', address);
     return address;
   } catch (error) {
     console.error('Error deriving Solana address:', error);
@@ -213,10 +212,10 @@ export function derivePolkadotAddress(publicKey: string): string {
  * - Header: 1 byte [type:4bits][network:4bits]
  *   - Type 0 = base address (payment + stake key hashes)
  *   - Network 0 = testnet, Network 1 = mainnet
- *   - So 0x00 = testnet base address
+ *   - So 0x01 = MAINNET base address
  * - Payment Key Hash: 28 bytes (Blake2b-224 of public key)
  * - Stake Key Hash: 28 bytes (using same key for simplicity)
- * - Bech32 encoding with 'addr_test' prefix for testnet
+ * - Bech32 encoding with 'addr' prefix for mainnet ('addr_test' was testnet)
  */
 export function deriveCardanoAddress(publicKey: string): string {
   try {
@@ -234,24 +233,24 @@ export function deriveCardanoAddress(publicKey: string): string {
     // In production, you'd derive a separate stake key
     const stakeKeyHash = paymentKeyHash;
 
-    // Address header: 0x00 for testnet base address (payment + stake)
-    // Bits: 0000 (type=base) 0000 (network=testnet)
-    const header = Buffer.from([0x00]);
+    // Address header: 0x01 for MAINNET base address (payment + stake)
+    // Bits: 0000 (type=base) 0001 (network=mainnet)
+    const header = Buffer.from([0x01]);
 
     // Combine: header + payment key hash + stake key hash
     const payload = Buffer.concat([header, paymentKeyHash, stakeKeyHash]);
 
-    console.log('🔍 Cardano address derivation:');
-    console.log('   Public key length:', pubKeyBytes.length, 'bytes');
-    console.log('   Payment key hash length:', paymentKeyHash.length, 'bytes');
-    console.log('   Total payload length:', payload.length, 'bytes (should be 57)');
+    debug('🔍 Cardano address derivation:');
+    debug('   Public key length:', pubKeyBytes.length, 'bytes');
+    debug('   Payment key hash length:', paymentKeyHash.length, 'bytes');
+    debug('   Total payload length:', payload.length, 'bytes (should be 57)');
 
     // Convert to 5-bit groups for bech32
     const words = bech32.toWords(payload);
 
-    // Encode with 'addr_test' prefix for Cardano testnet
-    const address = bech32.encode('addr_test', words, 1000); // limit=1000 for long addresses
-    console.log('   ✅ Cardano testnet address:', address);
+    // Encode with the 'addr' prefix for Cardano mainnet
+    const address = bech32.encode('addr', words, 1000); // limit=1000 for long addresses
+    debug('   ✅ Cardano mainnet address:', address);
 
     return address;
   } catch (error) {
@@ -314,34 +313,50 @@ export function deriveNearAddress(publicKey: string): string {
  * @returns Object mapping chain names to their addresses
  */
 export function deriveChainAddresses(publicKey: string, curve: number): { [chain: string]: string } {
-  console.log('🎯 deriveChainAddresses called:');
-  console.log('   Public key:', publicKey.substring(0, 20) + '...');
-  console.log('   Curve:', curve === 0 ? 'SECP256K1' : 'ED25519');
+  debug('🎯 deriveChainAddresses called:');
+  debug('   Public key:', publicKey.substring(0, 20) + '...');
+  debug('   Curve:', curve === 0 ? 'SECP256K1' : 'ED25519');
+
+  const safe = (fn: () => string): string => {
+    try {
+      return fn();
+    } catch (e) {
+      console.warn('address derivation failed:', e);
+      return 'Invalid public key';
+    }
+  };
+
+  if (curve === 3) {
+    // RISTRETTO / sr25519 — Polkadot's NATIVE scheme. SS58 encodes only the 32-byte public key, so
+    // the encoding is identical to the ed25519 variant; the difference is which curve signs.
+    const { deriveSs58Address } = require('./deriveMoreAddresses');
+    return { Polkadot: safe(() => deriveSs58Address(publicKey, 0)) };
+  }
 
   if (curve === 0) {
-    // SECP256K1 - Bitcoin, Ethereum, Polygon, Avalanche, BSC
+    // SECP256K1 — one address covers every EVM chain; Bitcoin re-encodes the same key as Taproot.
     const ethAddress = deriveEthereumAddress(publicKey);
     const btcAddress = deriveBitcoinAddress(publicKey);
 
     return {
-      'Bitcoin': btcAddress,
-      'Ethereum': ethAddress,
-      'Polygon': ethAddress, // Same as Ethereum (EVM compatible)
-      'Avalanche': ethAddress, // Same as Ethereum (C-Chain)
-      'BSC': ethAddress, // Same as Ethereum (EVM compatible)
+      Bitcoin: btcAddress,
+      // Every EVM chain shares this address — adding an L2 is a config entry, not new crypto.
+      Ethereum: ethAddress,
+      Base: ethAddress,
+      Arbitrum: ethAddress,
+      Optimism: ethAddress,
+      Polygon: ethAddress,
+      Avalanche: ethAddress,
+      BSC: ethAddress,
+      Linea: ethAddress,
+      Scroll: ethAddress,
     };
   } else {
-    // ED25519 - Solana, Polkadot, Cardano, NEAR
-    const solanaAddress = deriveSolanaAddress(publicKey);
-    const polkadotAddress = derivePolkadotAddress(publicKey);
-    const cardanoAddress = deriveCardanoAddress(publicKey);
-    const nearAddress = deriveNearAddress(publicKey);
-
+    // ED25519 — Solana, NEAR, Cardano. (Polkadot uses its native sr25519 curve; see curve === 3.)
     return {
-      'Solana': solanaAddress,
-      'Polkadot': polkadotAddress,
-      'Cardano': cardanoAddress,
-      'NEAR': nearAddress,
+      Solana: deriveSolanaAddress(publicKey),
+      Cardano: deriveCardanoAddress(publicKey),
+      NEAR: deriveNearAddress(publicKey),
     };
   }
 }

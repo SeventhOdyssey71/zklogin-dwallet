@@ -9,12 +9,14 @@
     "lint": "eslint"
   },
   "dependencies": {
-    "@ika.xyz/ika-wasm": "^0.2.1",
-    "@ika.xyz/sdk": "^0.2.3",
-    "@mysten/dapp-kit": "^0.19.11",
-    "@mysten/sui": "1.45.2",
+    "@cetusprotocol/aggregator-sdk": "^1.6.7",
     "@emurgo/cardano-serialization-lib-browser": "^15.0.3",
+    "@ika.xyz/ika-wasm": "^0.2.1",
+    "@ika.xyz/sdk": "^0.4.1",
+    "@mysten/dapp-kit": "^1.1.9",
+    "@mysten/sui": "2.22.1",
     "@polkadot/api": "^16.5.4",
+    "@scure/btc-signer": "2.2.0",
     "@solana/web3.js": "^1.98.4",
     "@tanstack/react-query": "^5.90.12",
     "bech32": "^2.0.0",

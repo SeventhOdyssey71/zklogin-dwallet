@@ -1,34 +1,55 @@
 @import "tailwindcss";
 
 /*
- * dWallet design system — clean, monospace-forward, dark-first.
- * Typography is JetBrains Mono throughout for a precise, technical feel.
+ * dWallet design system — monospace-forward, dark, near-monochrome.
+ *
+ * The palette is deliberately grayscale so that the few coloured things carry real meaning: green for
+ * a live on-chain event, amber for a stalled dWallet, red for a failure. Previously `--danger` was
+ * `#ffffff`, which meant an error message was visually identical to body text — the one place where
+ * monochrome purity actively harmed usability.
  */
 
 :root {
-  /* Strictly black & white / grayscale */
   --background: #000000;
   --surface: #0b0b0b;
   --surface-2: #161616;
+  --surface-3: #1f1f1f;
   --border: #2a2a2a;
+  --border-strong: #3d3d3d;
   --foreground: #ffffff;
   --muted: #9a9a9a;
+  --muted-2: #6e6e6e;
   --accent: #ffffff;
   --accent-2: #ffffff;
-  --danger: #ffffff;
+
+  /* Semantic states. Kept desaturated so they read as information, not decoration. */
+  --danger: #ff6b6b;
+  --danger-surface: rgba(255, 107, 107, 0.08);
+  --danger-border: rgba(255, 107, 107, 0.35);
+  --success: #4ade80;
+  --success-surface: rgba(74, 222, 128, 0.07);
+  --success-border: rgba(74, 222, 128, 0.35);
+  --warning: #fbbf24;
+  --warning-border: rgba(251, 191, 36, 0.35);
+
   --radius: 14px;
+  --radius-sm: 10px;
+  --radius-xs: 8px;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-surface: var(--surface);
   --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
   --color-border: var(--border);
   --color-foreground: var(--foreground);
   --color-muted: var(--muted);
   --color-accent: var(--accent);
   --color-accent-2: var(--accent-2);
   --color-danger: var(--danger);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
   --font-mono: var(--font-jetbrains-mono);
   --font-sans: var(--font-jetbrains-mono);
 }
@@ -41,6 +62,10 @@ html,
 body {
   padding: 0;
   margin: 0;
+  /* The page must never scroll horizontally. Wide content (long addresses, tables) scrolls inside its
+     own container instead — a sideways-scrolling body is always a layout bug. */
+  overflow-x: hidden;
+  max-width: 100%;
 }
 
 body {
@@ -67,6 +92,34 @@ body::before {
   background: rgba(255, 255, 255, 0.2);
 }
 
+/*
+ * Tailwind v4 removed the browser default `cursor: pointer` on buttons, so every button in the app
+ * showed a text/arrow cursor — it made interactive elements read as static. Restored here rather than
+ * adding a utility class to dozens of call sites.
+ */
+button:not(:disabled),
+[role="button"]:not(:disabled),
+summary {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+/*
+ * Visible keyboard focus.
+ *
+ * There was no focus style anywhere, which made the app unusable by keyboard: tabbing through the send
+ * form gave no indication of where you were. `:focus-visible` shows the ring only for keyboard
+ * navigation, so pointer users see no change.
+ */
+:focus-visible {
+  outline: 2px solid var(--foreground);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
 /* Thin, quiet scrollbars */
 ::-webkit-scrollbar {
   width: 10px;
@@ -76,11 +129,15 @@ body::before {
   background: var(--border);
   border-radius: 999px;
 }
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-strong);
+}
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 
-/* Reusable bits */
+/* ------------------------------- primitives ------------------------------- */
+
 .card {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -94,8 +151,58 @@ body::before {
   color: var(--muted);
 }
 
+/* Numeric values: tabular figures stop balances jittering as they update. */
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * Loading skeletons.
+ *
+ * Balances used to render as a bare "…", which is indistinguishable from a value of zero at a glance —
+ * exactly the wrong impression for a wallet. A shimmering block reads unmistakably as "not loaded yet".
+ */
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background: var(--surface-2);
+  border-radius: 6px;
+}
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.06), transparent);
+  animation: shimmer 1.4s infinite;
+}
+
+@keyframes shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
 @keyframes pulse-ring {
   0% { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.3); }
   70% { box-shadow: 0 0 0 10px rgba(255, 255, 255, 0); }
   100% { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0); }
+}
+
+/*
+ * Respect a reduced-motion preference.
+ *
+ * The app animates every view transition and shimmers its skeletons; for users who have asked the OS to
+ * reduce motion, that is not a nicety to override. Animations collapse to near-instant rather than being
+ * removed outright, so state changes are still perceptible.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

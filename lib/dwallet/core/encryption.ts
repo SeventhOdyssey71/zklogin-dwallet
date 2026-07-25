@@ -4,6 +4,7 @@
 
 import { UserShareEncryptionKeys, Curve } from '@ika.xyz/sdk';
 import { ethers } from 'ethers';
+import { getShareEncryptionKeys } from '@/lib/ika/shareKeys';
 
 /**
  * Generate deterministic encryption seed from Sui wallet address and curve
@@ -26,18 +27,17 @@ export function generateDeterministicEncryptionSeed(
 }
 
 /**
- * Generate UserShareEncryptionKeys from encryption seed
+ * Resolve UserShareEncryptionKeys for a curve.
+ *
+ * Goes through the cache in `lib/ika/shareKeys.ts`: deriving these takes ~5s of blocking wasm and is
+ * otherwise repeated on every single send, since signing needs the same keys to decrypt the user share.
  */
 export async function generateEncryptionKeys(
   encryptionSeed: Uint8Array,
-  curve: Curve
+  curve: Curve,
+  suiAddress: string
 ): Promise<UserShareEncryptionKeys> {
-  const userShareEncryptionKeys = await UserShareEncryptionKeys.fromRootSeedKey(
-    encryptionSeed,
-    curve
-  );
-
-  console.log('✅ User share encryption keys generated');
-
-  return userShareEncryptionKeys;
+  const keys = await getShareEncryptionKeys({ suiAddress, curve, rootSeed: encryptionSeed });
+  console.log('✅ User share encryption keys ready');
+  return keys;
 }

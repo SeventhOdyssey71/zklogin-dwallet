@@ -1,0 +1,231 @@
+'use client';
+
+/**
+ * Single-row navigation: brand, tabs, live SUI/IKA balances, account.
+ *
+ * Previously these were three stacked rows — logo+tabs, then account, then a separate balance strip —
+ * because everything competed for one `flex-wrap` container that was too narrow to hold it. Collapsing
+ * them into one row means the header stops eating vertical space, which is also what lets the page
+ * content sit centred in the viewport instead of being pushed down.
+ *
+ * Below `lg` the tabs, balances and account move into a hamburger panel rather than wrapping: four
+ * tab labels plus two balance pills plus an address cannot fit a phone width, and wrapping them was
+ * what pushed the layout past the viewport edge.
+ */
+
+import { useEffect, useState } from 'react';
+import { useSuiClient } from '@mysten/dapp-kit';
+import { Loader2, Menu, X } from 'lucide-react';
+import { ConnectWallet } from '@/components/ConnectWallet';
+import { IKA_COIN_TYPE } from '@/lib/config/network';
+
+const SUI_LOGO = 'https://cryptologos.cc/logos/sui-sui-logo.png';
+const IKA_LOGO = 'https://coin-images.coingecko.com/coins/images/67598/large/ika.jpg?1753770879';
+
+export type NavTab = 'create' | 'wallets' | 'all' | 'sui';
+
+const TABS: { key: NavTab; label: string; short: string }[] = [
+  { key: 'create', label: 'Create', short: 'Create' },
+  { key: 'wallets', label: 'My wallets', short: 'Wallets' },
+  { key: 'all', label: 'All chains', short: 'Chains' },
+  { key: 'sui', label: 'My Sui Wallet', short: 'Sui Wallet' },
+];
+
+function fmt(raw: string, decimals: number): string {
+  const n = Number(raw) / 10 ** decimals;
+  return n.toLocaleString(undefined, { maximumFractionDigits: 4 });
+}
+
+/** SUI + IKA balances of the signed-in address. */
+function useGasBalances(address: string | undefined) {
+  const suiClient = useSuiClient();
+  const [sui, setSui] = useState<string | null>(null);
+  const [ika, setIka] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [tick, setTick] = useState(0);
+
+  useEffect(() => {
+    if (!address) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const [s, i, meta] = await Promise.all([
+          suiClient.getBalance({ owner: address }),
+          suiClient
+            .getBalance({ owner: address, coinType: IKA_COIN_TYPE })
+            .catch(() => ({ totalBalance: '0' })),
+          suiClient.getCoinMetadata({ coinType: IKA_COIN_TYPE }).catch(() => null),
+        ]);
+        if (cancelled) return;
+        setSui(fmt(s.totalBalance, 9));
+        setIka(fmt(i.totalBalance, meta?.decimals ?? 9));
+      } catch (e) {
+        console.error('Failed to load gas balances:', e);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [suiClient, address, tick]);
+
+  return { sui, ika, loading, refresh: () => setTick((t) => t + 1) };
+}
+
+function BalancePill({
+  logo,
+  symbol,
+  amount,
+  loading,
+}: {
+  logo: string;
+  symbol: string;
+  amount: string | null;
+  loading: boolean;
+}) {
+  return (
+    <span
+      title={`${amount ?? '0'} ${symbol}`}
+      className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-full border border-[var(--border)] bg-[var(--surface)] whitespace-nowrap"
+    >
+      <span className="w-4 h-4 rounded-full bg-white/90 grid place-items-center overflow-hidden shrink-0">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src={logo} alt="" className="w-4 h-4 object-contain" />
+      </span>
+      <span className="text-xs num">
+        {amount ?? (loading ? '…' : '0')} <span className="text-[var(--muted)]">{symbol}</span>
+      </span>
+    </span>
+  );
+}
+
+export function NavBar({
+  tab,
+  setTab,
+  address,
+}: {
+  tab: NavTab;
+  setTab: (t: NavTab) => void;
+  address?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const { sui, ika, loading, refresh } = useGasBalances(address);
+
+  // Close the mobile panel on navigation.
+  const go = (t: NavTab) => {
+    setTab(t);
+    setOpen(false);
+  };
+
+  /**
+   * `showRefresh` is false in the desktop row between lg and xl: with it, the full row needs ~1030px
+   * and overflows a 1024px window by a few pixels. The mobile panel has room, so it keeps the control.
+   */
+  const balances = (showRefresh: boolean) => (
+    <div className="flex items-center gap-1.5">
+      <BalancePill logo={SUI_LOGO} symbol="SUI" amount={sui} loading={loading} />
+      <BalancePill logo={IKA_LOGO} symbol="IKA" amount={ika} loading={loading} />
+      {showRefresh && (
+        <button
+          onClick={refresh}
+          disabled={loading}
+          className="mono-label px-1 hover:text-[var(--foreground)] transition disabled:opacity-50"
+          title="Refresh balances"
+          aria-label="Refresh SUI and IKA balances"
+        >
+          {loading ? <Loader2 className="w-3 h-3 animate-spin" /> : '↻'}
+        </button>
+      )}
+    </div>
+  );
+
+  return (
+    <header className="sticky top-0 z-30 border-b border-[var(--border)]/60 bg-[var(--background)]/85 backdrop-blur-md">
+      <div className="max-w-6xl mx-auto w-full px-4 sm:px-6 py-3 flex items-center gap-4">
+        <button
+          onClick={() => go('create')}
+          className="font-extrabold tracking-tight text-lg shrink-0 hover:opacity-80 transition"
+          aria-label="dWallet — go to Create"
+        >
+          dWallet
+        </button>
+
+        {/* Desktop: everything on one row. */}
+        {address && (
+          <nav aria-label="Views" className="hidden lg:flex items-center gap-1 text-sm">
+            {TABS.map((t) => (
+              <button
+                key={t.key}
+                onClick={() => go(t.key)}
+                aria-current={tab === t.key ? 'page' : undefined}
+                className={`px-3 py-1.5 rounded-[8px] whitespace-nowrap transition ${
+                  tab === t.key
+                    ? 'bg-[var(--surface-2)] text-[var(--foreground)] border border-[var(--border)]'
+                    : 'text-[var(--muted)] hover:text-[var(--foreground)]'
+                }`}
+              >
+                {/* Abbreviated between lg and xl: with full labels the row needs ~1030px and
+                    overflows a 1024px window by a few pixels. */}
+                <span className="xl:hidden">{t.short}</span>
+                <span className="hidden xl:inline">{t.label}</span>
+              </button>
+            ))}
+          </nav>
+        )}
+
+        <div className="flex-1" />
+
+        {address && (
+          <>
+            <div className="hidden lg:flex xl:hidden">{balances(false)}</div>
+            <div className="hidden xl:flex">{balances(true)}</div>
+          </>
+        )}
+        <div className="hidden lg:block shrink-0">
+          <ConnectWallet />
+        </div>
+
+        {/* Mobile: one hamburger instead of wrapping six controls onto three rows. */}
+        {address ? (
+          <button
+            onClick={() => setOpen((o) => !o)}
+            aria-label={open ? 'Close menu' : 'Open menu'}
+            aria-expanded={open}
+            className="lg:hidden p-2 -mr-1 rounded-[10px] border border-[var(--border)] hover:bg-[var(--surface-2)] transition"
+          >
+            {open ? <X className="w-4 h-4" /> : <Menu className="w-4 h-4" />}
+          </button>
+        ) : (
+          <div className="lg:hidden">
+            <ConnectWallet />
+          </div>
+        )}
+      </div>
+
+      {/* Mobile panel */}
+      {address && open && (
+        <div className="lg:hidden border-t border-[var(--border)]/60 px-4 sm:px-6 py-3 space-y-3">
+          <nav aria-label="Views" className="grid grid-cols-2 gap-1.5 text-sm">
+            {TABS.map((t) => (
+              <button
+                key={t.key}
+                onClick={() => go(t.key)}
+                aria-current={tab === t.key ? 'page' : undefined}
+                className={`px-3 py-2 rounded-[8px] text-left whitespace-nowrap transition ${
+                  tab === t.key
+                    ? 'bg-[var(--surface-2)] text-[var(--foreground)] border border-[var(--border)]'
+                    : 'text-[var(--muted)] hover:text-[var(--foreground)] border border-transparent'
+                }`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </nav>
+          <div className="flex flex-wrap items-center gap-2">{balances(true)}</div>
+          <ConnectWallet />
+        </div>
+      )}
+    </header>
+  );
+}
