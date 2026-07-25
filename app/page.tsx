@@ -31,6 +31,19 @@ const CHAIN_SYMBOLS: Record<string, string> = Object.fromEntries(
   CHAINS.map((c) => [c.id, c.symbol])
 );
 
+/**
+ * Trim trailing zeros from a balance.
+ *
+ * Fetchers pad to a fixed number of decimals, so every empty chain rendered as "0.000000" and a real
+ * balance as "0.023630" — visually almost identical at a glance, which is the opposite of what a
+ * balance list is for.
+ */
+const trimAmount = (v: string): string => {
+  if (!v.includes('.')) return v;
+  const trimmed = v.replace(/0+$/, '').replace(/\.$/, '');
+  return trimmed === '' || trimmed === '-' ? '0' : trimmed;
+};
+
 const fmtUsd = (v: number) =>
   v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
@@ -108,8 +121,10 @@ export default function Home() {
 
       {/* Content is centred in whatever space the navbar and footer leave, so a short page like
           Create sits in the middle of the viewport rather than hugging the top. */}
+      {/* Create is a single column of prose and one card, so it stays narrow and centred; the
+          data-dense views take the full container width. */}
       <section className="flex-1 flex items-center justify-center px-4 sm:px-6 py-8">
-        <div className="w-full max-w-3xl">
+        <div className={`w-full mx-auto ${view === 'create' ? 'max-w-3xl' : 'max-w-7xl'}`}>
           {loading ? (
             <div className="card p-10 flex items-center justify-center gap-3 text-sm text-[var(--muted)]">
               <Loader2 className="w-4 h-4 animate-spin" aria-hidden /> Restoring your session…
@@ -460,7 +475,7 @@ function WalletsView({
       )}
 
       {wallets && wallets.length > 0 && (
-        <div className="grid sm:grid-cols-2 gap-3">
+        <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-3">
           {wallets.map((w, i) => (
             <button
               key={w.id}
@@ -706,7 +721,7 @@ function AllChainsView({
           )}
 
           {rows.length > 0 && (
-            <div className="grid sm:grid-cols-2 gap-3">
+            <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-3">
               {rows.map((r) => (
                 <ChainRowCard
                   key={r.chain}
@@ -886,7 +901,7 @@ function WalletDetail({
         )}
 
         {!loading && active && (
-          <div className="space-y-2">
+          <div className="grid sm:grid-cols-2 gap-2">
             {rows.map((r) => (
               <ChainRowCard
                 key={r.chain}
@@ -927,24 +942,25 @@ function ChainRowCard({
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-3 min-w-0">
           {row.logo ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img src={row.logo} alt="" className="w-8 h-8 rounded-full grayscale" />
+            <span className="w-8 h-8 rounded-full bg-white grid place-items-center overflow-hidden shrink-0">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={row.logo} alt="" className="w-[26px] h-[26px] object-contain" />
+            </span>
           ) : (
-            <div className="w-8 h-8 rounded-full bg-[var(--surface-2)] grid place-items-center text-[10px]">
+            <div className="w-8 h-8 rounded-full bg-[var(--surface-2)] grid place-items-center text-[10px] shrink-0">
               {row.symbol.slice(0, 3)}
             </div>
           )}
           <div className="min-w-0">
-            <div className="font-semibold text-sm flex items-center gap-1.5">
+            <div className="font-semibold text-sm flex items-center gap-1.5 truncate">
               {row.chain}
               {live && (
                 <span
-                  className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500"
+                  className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0"
                   title="Balance just updated from a realtime on-chain event"
                 />
               )}
             </div>
-            <div className="mono-label">{row.symbol}</div>
           </div>
         </div>
         <div className="text-right shrink-0">
@@ -956,7 +972,8 @@ function ChainRowCard({
           ) : (
             <>
               <div className="text-sm font-semibold num">
-                {balance.balance} {row.symbol}
+                {trimAmount(balance.balance)}{' '}
+                <span className="text-[var(--muted)] font-normal">{row.symbol}</span>
               </div>
               <div className="mono-label num flex items-center justify-end gap-1">
                 {/* A failed read keeps the last known value rather than showing zero, so it has to say
@@ -973,10 +990,10 @@ function ChainRowCard({
         </div>
       </div>
 
-      {/* Receive (copy the address, or open it on an explorer) + Send */}
-      <div className="mt-3 flex items-end gap-2">
+      {/* Copy the address to receive, open it on an explorer, or send from it. */}
+      <div className="mt-3 flex items-center gap-1.5">
         <div className="flex-1 min-w-0">
-          <CopyField label="Receive" value={row.address} href={addressUrl(row.chain, row.address)} />
+          <CopyField value={row.address} href={addressUrl(row.chain, row.address)} />
         </div>
         <Button
           size="md"

@@ -174,10 +174,10 @@ export function CopyField({
           onClick={copy}
           title={`${value}\n\nClick to copy`}
           aria-label={`Copy ${label ?? 'value'}: ${value}`}
-          className="group flex-1 min-w-0 flex items-center gap-2 px-3 py-2 rounded-[var(--radius-xs)] bg-[var(--surface-2)] border border-[var(--border)] hover:border-[var(--border-strong)] transition text-left"
+          className="group flex-1 min-w-0 flex items-center gap-2 px-2.5 py-2 rounded-[var(--radius-xs)] bg-[var(--surface-2)] border border-[var(--border)] hover:border-[var(--border-strong)] transition text-left"
         >
           <code className={`text-xs flex-1 min-w-0 ${full ? 'break-all' : 'truncate'}`}>
-            {full ? value : truncate(value, 12, 10)}
+            {full ? value : truncate(value, 8, 6)}
           </code>
           {state === 'copied' ? (
             <Check className="w-3.5 h-3.5 shrink-0 text-[var(--success)]" aria-hidden />

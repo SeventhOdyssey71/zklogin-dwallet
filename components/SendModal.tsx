@@ -264,6 +264,7 @@ export function SendModal({
         userAccount: { address: zkAddress },
         signAndExecuteTransaction: (params: { transaction: unknown }) =>
           zkLoginSignAndExecute(suiClient, zkAddress, params as never),
+        onProgress: setStatus,
       });
 
       let finalHash: string;

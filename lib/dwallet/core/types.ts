@@ -19,6 +19,8 @@ export interface SignTransactionParams {
   suiClient: AppSuiClient;
   userAccount: any; // Sui wallet account from @mysten/dapp-kit
   signAndExecuteTransaction: (params: any) => Promise<any>;
+  /** Called as each phase begins, so the UI can show what is actually happening. */
+  onProgress?: (message: string) => void;
 }
 
 /**

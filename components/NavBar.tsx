@@ -142,7 +142,7 @@ export function NavBar({
 
   return (
     <header className="sticky top-0 z-30 border-b border-[var(--border)]/60 bg-[var(--background)]/85 backdrop-blur-md">
-      <div className="max-w-6xl mx-auto w-full px-4 sm:px-6 py-3 flex items-center gap-4">
+      <div className="max-w-7xl mx-auto w-full px-4 sm:px-6 py-3 flex items-center gap-4">
         <button
           onClick={() => go('create')}
           className="font-extrabold tracking-tight text-lg shrink-0 hover:opacity-80 transition"

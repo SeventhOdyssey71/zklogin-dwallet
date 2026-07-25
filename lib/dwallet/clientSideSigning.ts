@@ -39,12 +39,15 @@ export { initializeClientSideSigning } from './core/client';
 /**
  * Polling cadence for MPC session state (presign, sign).
  *
- * 2PC-MPC v4 completes a pooled presign essentially immediately and the online signing round in
- * ~400ms. The previous 2000ms interval meant a send spent seconds sitting in `setTimeout` after the
- * network had already finished — the dominant source of the old perceived slowness. 250ms tracks the
- * protocol closely while staying polite to the RPC; the timeout stays generous for a congested epoch.
+ * A single state read measures ~196ms against the Sui fullnode, so the real detection granularity is
+ * `read + interval`. At the previous 250ms that is a ~446ms cycle and an average lag of ~223ms between
+ * the network finishing and us noticing; at 80ms it is ~276ms and ~138ms. Worth taking — it is pure
+ * dead time — though it is a small share of the wait: the MPC round itself is the cost, and that is the
+ * Ika committee's work plus Sui propagation, not something the client can shorten.
+ *
+ * ~3.6 requests/second is well within what the fullnode serves comfortably.
  */
-const MPC_POLL = { timeout: 60_000, interval: 250 } as const;
+const MPC_POLL = { timeout: 60_000, interval: 80 } as const;
 
 /**
  * Verbose signing logs, off by default.
@@ -95,6 +98,15 @@ export async function signWithDWallet(
   params: SignTransactionParams
 ): Promise<SignedTransactionResult> {
   const T = new Timings(`Send ${params.amount} on ${params.chain}`);
+
+  /**
+   * Report progress to the caller.
+   *
+   * A send takes ~13s, of which roughly three quarters is Sui and Ika network time we cannot shorten.
+   * Showing a single unchanging line for all of it makes a working transaction look hung, so each phase
+   * announces itself instead.
+   */
+  const step = (message: string) => params.onProgress?.(message);
 
   // Curve / algorithm / hash come from one shared resolver so the presignature pool and this path
   // cannot disagree — a presignature bought for the wrong algorithm is unusable, and the mismatch
@@ -229,6 +241,7 @@ export async function signWithDWallet(
 
   if (banked) {
     console.log('1️⃣ Presignature ready from the pool (v4, zero wait)');
+    step('Presignature ready — preparing the transaction…');
     completedPresign = banked.presign as typeof completedPresign;
     T.note('presign (from pool)', performance.now() - presignWait);
   } else {
@@ -240,6 +253,7 @@ export async function signWithDWallet(
         ? '1️⃣ Joining a presignature purchase already in flight…'
         : '1️⃣ No banked presignature — buying one now (this is the slow path)…'
     );
+    step('Getting a presignature from the Ika network…');
     const acquired = await T.step('presign (bought inline)', async () => {
       if (inflight) return inflight;
       await primePresignPool(poolParams);
@@ -270,6 +284,7 @@ export async function signWithDWallet(
   const blockhashFetchTime = Date.now();
 
   console.log('2️⃣ Requesting signature…');
+  step('Building your signature request…');
 
   const signTx = new Transaction();
   const signIkaTx = new IkaTransaction({
@@ -392,6 +407,7 @@ export async function signWithDWallet(
 
   // Execute sign transaction
   debug('⏳ Executing sign transaction with Sui wallet...');
+  step('Approving with zkLogin…');
   const signTxResult = await T.step('sign tx (zkLogin submit)', () =>
     params.signAndExecuteTransaction({
       transaction: signTx,
@@ -486,6 +502,7 @@ export async function signWithDWallet(
   // With a pooled presign this is the single online round the v4 upgrade reduced to ~400ms, so a
   // 2s poll interval could more than triple the observed signing latency on its own.
   console.log('3️⃣ Waiting for the MPC signature…');
+  step('Ika network is signing (this is the longest step)…');
 
   const completedSign = await T.step('MPC sign round', () =>
     ikaClient.getSignInParticularState(signId, curve, signatureAlgorithm, 'Completed', MPC_POLL)
@@ -512,6 +529,7 @@ export async function signWithDWallet(
 
   // === STEP 5: Construct Signed Transaction ===
   console.log('4️⃣ Constructing signed transaction…');
+  step('Signature received — assembling the transaction…');
 
   let serialized: string;
   let hash: string;
