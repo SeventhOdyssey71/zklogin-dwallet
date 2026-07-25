@@ -45,7 +45,11 @@ import { getShareEncryptionKeys } from '@/lib/ika/shareKeys';
  * it natively — it is the WebAuthn/passkey curve, and on-chain its main use is Sui's own secp256r1
  * accounts. It is intentionally omitted rather than shipped as a wallet with no chains behind it.
  */
-export type DWalletKind = 'ECDSA' | 'EdDSA' | 'Schnorrkel';
+// Re-exported so existing imports keep working; defined in `./curves`, which has no dependencies and
+// can therefore be imported without pulling this module's ethers/SDK weight into the page bundle.
+export type { DWalletKind } from './curves';
+export { ALL_KINDS } from './curves';
+import { ALL_KINDS, type DWalletKind } from './curves';
 
 /**
  * dWallet state polling.
@@ -175,8 +179,6 @@ type ActiveState = { Active?: { public_output?: number[] } };
  * network rather than one after the other.
  */
 /** Every kind this app creates, in display order. */
-export const ALL_KINDS: DWalletKind[] = ['ECDSA', 'EdDSA', 'Schnorrkel'];
-
 export interface CreateBothParams {
   suiClient: AppSuiClient;
   account: { address: string };

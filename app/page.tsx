@@ -1,27 +1,64 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useSuiClient } from '@mysten/dapp-kit';
 import { toast } from 'sonner';
 import { Check, Loader2, RefreshCw } from 'lucide-react';
-import { SendModal } from '@/components/SendModal';
+import dynamic from 'next/dynamic';
 import { PresignPoolBadge } from '@/components/PresignPoolBadge';
 import { NavBar, type NavTab } from '@/components/NavBar';
 import { ConnectWallet } from '@/components/ConnectWallet';
 import { useZkLogin } from '@/lib/useZkLogin';
 import { zkLoginSignAndExecute } from '@/lib/zklogin/execute';
-import { createBothDWallets, ALL_KINDS, CreateStep, CreatedDWallet, DWalletKind } from '@/lib/ika/createDWallet';
-import { listDWallets, OwnedDWallet } from '@/lib/ika/listDWallets';
+// Types are erased at build time, so importing them costs nothing. `createBothDWallets` is loaded on
+// demand in `handleCreate` — it pulls ethers and the Ika SDK, and nobody needs either until they
+// actually press Create.
+import type { CreateStep, CreatedDWallet } from '@/lib/ika/createDWallet';
+import { ALL_KINDS, type DWalletKind } from '@/lib/ika/curves';
+import { listDWallets } from '@/lib/ika/listDWallets';
 import { IKA_ACQUIRE_URL } from '@/lib/config/network';
 import { CHAINS } from '@/lib/config/chainRegistry';
 import { AllChainChips, useChainAssets, chainCount } from '@/components/ChainChips';
 import { SuiWalletView } from '@/components/SuiWalletView';
-import { Button, CopyField, ErrorNote, Skeleton, truncate } from '@/components/ui';
+import { Button, CopyField, ErrorNote, Skeleton } from '@/components/ui';
 import { useBalances, useAgeLabel, REFRESH_SECONDS, type BalanceTarget } from '@/lib/balances/useBalances';
 import type { Entry as BalanceEntry } from '@/lib/balances/store';
 import { friendlyError, type FriendlyError } from '@/lib/ui/errors';
 import { addressUrl } from '@/lib/config/chainRegistry';
+
+/**
+ * The send dialog, loaded on demand.
+ *
+ * `SendModal` pulls in `clientSideSigning`, which statically imports every chain signer — and with them
+ * `@polkadot/api` (875 KB on its own), ethers, `@solana/web3.js`, `@scure/btc-signer` and the Ika SDK.
+ * None of that is needed to *look* at balances, yet all of it was in the initial page load: 3.6 MB of
+ * JavaScript before anyone could see a number.
+ *
+ * Rendered only while open (not merely mounted with `open={false}`), or the dynamic import would fire
+ * immediately for all fourteen rows and defer nothing. `prefetchSendModal` below then loads it during
+ * idle time, so it is already in memory by the time anyone clicks Send.
+ */
+const SendModal = dynamic(() => import('@/components/SendModal').then((m) => m.SendModal), {
+  ssr: false,
+});
+
+/**
+ * Warm the send dialog once the page is idle.
+ *
+ * Without this, deferring the module would simply move the cost to the moment the user wants to act —
+ * the worst possible time. Idle-time prefetch keeps the fast first paint and removes the click delay.
+ */
+function prefetchSendModal(): void {
+  if (typeof window === 'undefined') return;
+  const load = () => void import('@/components/SendModal');
+  if ('requestIdleCallback' in window) {
+    (window as Window & { requestIdleCallback: (cb: () => void, o?: { timeout: number }) => void })
+      .requestIdleCallback(load, { timeout: 4_000 });
+  } else {
+    setTimeout(load, 2_000);
+  }
+}
 
 /** Minimal account shape used across views (zkLogin user → Sui address). */
 type ZkAccount = { address: string } | null;
@@ -76,7 +113,7 @@ const CHAIN_ORDER = [
   'Polkadot',
 ];
 
-const TAB_KEYS: NavTab[] = ['create', 'wallets', 'all', 'sui'];
+const TAB_KEYS: NavTab[] = ['create', 'all', 'sui'];
 
 /**
  * Keep the active tab in the URL hash.
@@ -123,7 +160,11 @@ export default function Home() {
           Create sits in the middle of the viewport rather than hugging the top. */}
       {/* Create is a single column of prose and one card, so it stays narrow and centred; the
           data-dense views take the full container width. */}
-      <section className="flex-1 flex items-center justify-center px-4 sm:px-6 py-8">
+      <section
+        className={`flex-1 flex justify-center px-4 sm:px-6 py-8 ${
+          view === 'create' ? 'items-center' : 'items-start'
+        }`}
+      >
         <div className={`w-full mx-auto ${view === 'create' ? 'max-w-3xl' : 'max-w-7xl'}`}>
           {loading ? (
             <div className="card p-10 flex items-center justify-center gap-3 text-sm text-[var(--muted)]">
@@ -132,10 +173,7 @@ export default function Home() {
           ) : (
             <>
               {view === 'create' && (
-                <CreateView account={account} onCreated={() => setTab('wallets')} />
-              )}
-              {view === 'wallets' && (
-                <WalletsView account={account} onCreate={() => setTab('create')} />
+                <CreateView account={account} onCreated={() => setTab('all')} />
               )}
               {view === 'all' && <AllChainsView account={account} onCreate={() => setTab('create')} />}
               {view === 'sui' && account && <SuiWalletView address={account.address} />}
@@ -208,6 +246,7 @@ function CreateView({
     setError(null);
     setResult(null);
     try {
+      const { createBothDWallets } = await import('@/lib/ika/createDWallet');
       const created = await createBothDWallets({
         suiClient,
         account,
@@ -399,138 +438,13 @@ function CreateView({
                 Create another
               </Button>
               <Button size="lg" onClick={onCreated}>
-                View my wallets
+                View all chains
               </Button>
             </div>
           </motion.div>
         )}
       </AnimatePresence>
     </>
-  );
-}
-
-/* --------------------------- My wallets --------------------------- */
-
-function WalletsView({
-  account,
-  onCreate,
-}: {
-  account: ZkAccount;
-  onCreate: () => void;
-}) {
-  const suiClient = useSuiClient();
-  const [wallets, setWallets] = useState<OwnedDWallet[] | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<FriendlyError | null>(null);
-  const [selected, setSelected] = useState<OwnedDWallet | null>(null);
-
-  const load = useCallback(async () => {
-    if (!account) return;
-    setLoading(true);
-    setError(null);
-    try {
-      const list = await listDWallets(suiClient, account.address);
-      setWallets(list);
-    } catch (e) {
-      console.error(e);
-      setError(friendlyError(e));
-    } finally {
-      setLoading(false);
-    }
-  }, [account, suiClient]);
-
-  useEffect(() => {
-    load();
-  }, [load]);
-
-  if (selected) {
-    return <WalletDetail wallet={selected} account={account} onBack={() => setSelected(null)} />;
-  }
-
-  return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-extrabold tracking-tight">My wallets</h1>
-          <div className="mono-label mt-1">dWallets owned by this address</div>
-        </div>
-        <Button variant="secondary" onClick={load} loading={loading}>
-          {loading ? 'Refreshing…' : 'Refresh'}
-        </Button>
-      </div>
-
-      {loading && !wallets && (
-        <div className="card p-8 flex items-center justify-center gap-3 text-sm text-[var(--muted)]">
-          <Loader2 className="w-4 h-4 animate-spin" /> Reading dWallets from Sui…
-        </div>
-      )}
-
-      {error && <ErrorNote {...error} />}
-
-      {wallets && wallets.length === 0 && !loading && (
-        <div className="card p-8 text-center space-y-4">
-          <p className="text-sm text-[var(--muted)]">No dWallets yet for this address.</p>
-          <Button onClick={onCreate}>Create your first dWallet</Button>
-        </div>
-      )}
-
-      {wallets && wallets.length > 0 && (
-        <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-3">
-          {wallets.map((w, i) => (
-            <button
-              key={w.id}
-              onClick={() => setSelected(w)}
-              className={`card p-4 w-full flex items-center justify-between gap-3 text-left cursor-pointer hover:bg-[var(--surface-2)] hover:border-[var(--foreground)]/40 transition ${
-                i === 0 ? 'border-[var(--foreground)]/60' : ''
-              }`}
-            >
-              <div className="min-w-0">
-                <div className="flex items-center gap-2 mb-1 flex-wrap">
-                  <span className="font-bold text-sm">{w.curve}</span>
-                  <StateBadge state={w.state} />
-                  {i === 0 && (
-                    <span className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full bg-[var(--foreground)] text-black">
-                      Newest
-                    </span>
-                  )}
-                </div>
-                <code className="text-xs text-[var(--muted)] break-all">{w.id}</code>
-                {w.createdAtEpoch > 0 && (
-                  <div className="mono-label mt-1">created · epoch {w.createdAtEpoch}</div>
-                )}
-              </div>
-              <span className="text-[var(--muted)] text-lg shrink-0">›</span>
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/**
- * A dWallet that never reached `Active` cannot be revived: finishing the DKG requires the exact
- * `userPublicOutput` from the browser session that started it, and that value is not reproducible
- * from the deterministic seed. So an interrupted creation leaves a permanently unusable dWallet —
- * labelling it "Pending" would imply it is still going somewhere.
- */
-function StateBadge({ state }: { state: string }) {
-  const active = state === 'Active';
-  return (
-    <span
-      title={
-        active
-          ? 'Ready to sign'
-          : `Stuck at "${state}" — its DKG never finished, and it cannot be completed later. Create a new one.`
-      }
-      className={`text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full border ${
-        active
-          ? 'border-emerald-500/60 text-emerald-400'
-          : 'border-amber-500/50 text-amber-400/90'
-      }`}
-    >
-      {active ? 'Active' : 'Incomplete'}
-    </span>
   );
 }
 
@@ -612,6 +526,7 @@ function AllChainsView({
       // Registering the targets is what starts polling; the store fetches them itself.
       setTargets(nextTargets.filter((t) => CHAIN_ORDER.includes(t.chain)));
       setLoading(false);
+      prefetchSendModal();
     } catch (e) {
       console.error(e);
       setError(friendlyError(e));
@@ -670,13 +585,32 @@ function AllChainsView({
   const total = rows.reduce((sum, r) => sum + (balances[r.chain]?.usdValue ?? 0), 0);
   const priced = rows.filter((r) => balances[r.chain]?.at);
 
+  /**
+   * Highest balance first.
+   *
+   * Ordered by USD value, then by raw amount so a chain holding funds we could not price still outranks
+   * an empty one, and finally by the canonical chain order so the empty majority keeps a stable,
+   * predictable arrangement instead of shuffling on every refresh.
+   */
+  const ordered = useMemo(() => {
+    return [...rows].sort((a, b) => {
+      const av = balances[a.chain]?.usdValue ?? 0;
+      const bv = balances[b.chain]?.usdValue ?? 0;
+      if (bv !== av) return bv - av;
+      const aAmount = parseFloat(balances[a.chain]?.balance ?? '0') || 0;
+      const bAmount = parseFloat(balances[b.chain]?.balance ?? '0') || 0;
+      if (bAmount !== aAmount) return bAmount - aAmount;
+      return CHAIN_ORDER.indexOf(a.chain) - CHAIN_ORDER.indexOf(b.chain);
+    });
+  }, [rows, balances]);
+
   return (
     <div className="space-y-4">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <h1 className="text-2xl font-extrabold tracking-tight">All chains</h1>
           <div className="mono-label mt-1">
-            {rows.length} chains · updated {age}
+            {loading ? 'Finding your addresses…' : `${rows.length} chains · updated ${age}`}
           </div>
         </div>
         <div className="flex items-center gap-3 shrink-0">
@@ -700,8 +634,14 @@ function AllChainsView({
       </div>
 
       {loading && (
-        <div className="card p-8 flex items-center justify-center gap-3 text-sm text-[var(--muted)]">
-          <Loader2 className="w-4 h-4 animate-spin" aria-hidden /> Finding your dWallets and addresses…
+        <div
+          aria-busy="true"
+          aria-label="Loading your chains"
+          className="grid sm:grid-cols-2 xl:grid-cols-3 gap-3"
+        >
+          {Array.from({ length: 9 }, (_, i) => (
+            <ChainCardSkeleton key={i} />
+          ))}
         </div>
       )}
 
@@ -720,9 +660,9 @@ function AllChainsView({
             <MissingCurveNote label="No active Schnorrkel wallet — create one to add Polkadot." onCreate={onCreate} />
           )}
 
-          {rows.length > 0 && (
+          {ordered.length > 0 && (
             <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-3">
-              {rows.map((r) => (
+              {ordered.map((r) => (
                 <ChainRowCard
                   key={r.chain}
                   row={r}
@@ -735,6 +675,35 @@ function AllChainsView({
           )}
         </>
       )}
+    </div>
+  );
+}
+
+/**
+ * The shape of a chain card, before its data exists.
+ *
+ * A centred spinner tells you something is happening but nothing about what is coming, and the layout
+ * jumps when the real content replaces it. Mirroring the actual card means the page is laid out
+ * correctly from the first frame and only the values fill in.
+ */
+function ChainCardSkeleton() {
+  return (
+    <div className="rounded-[12px] border border-[var(--border)] p-3.5">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3 min-w-0">
+          <Skeleton className="w-8 h-8 rounded-full" />
+          <Skeleton className="h-3.5 w-24" />
+        </div>
+        <div className="flex flex-col items-end gap-1.5">
+          <Skeleton className="h-3.5 w-20" />
+          <Skeleton className="h-2.5 w-12" />
+        </div>
+      </div>
+      <div className="mt-3 flex items-center gap-1.5">
+        <Skeleton className="h-9 flex-1 rounded-[var(--radius-xs)]" />
+        <Skeleton className="h-9 w-9 rounded-[var(--radius-xs)]" />
+        <Skeleton className="h-9 w-16 rounded-[var(--radius-xs)]" />
+      </div>
     </div>
   );
 }
@@ -766,155 +735,6 @@ interface ChainRow {
   /** Which dWallet this chain belongs to (for sending). */
   dwalletId: string;
   dwalletCapId: string;
-}
-
-function WalletDetail({
-  wallet,
-  account,
-  onBack,
-}: {
-  wallet: OwnedDWallet;
-  account: ZkAccount;
-  onBack: () => void;
-}) {
-  const suiClient = useSuiClient();
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<FriendlyError | null>(null);
-  const [rows, setRows] = useState<ChainRow[]>([]);
-  const [targets, setTargets] = useState<BalanceTarget[]>([]);
-  const [active, setActive] = useState(true);
-
-  const { balances, busy, updatedAt, refresh } = useBalances(targets);
-  const age = useAgeLabel(updatedAt);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      setLoading(true);
-      setError(null);
-      try {
-        // Lazy-load the heavy crypto/RPC modules on the client only (keeps them out of SSR/prerender).
-        const [{ getDWalletAddresses }, { fetchTokenMarkets }] = await Promise.all([
-          import('@/lib/ika/walletDetail'),
-          import('@/lib/utils/prices'),
-        ]);
-        const { addresses, curveNumber, active: isActive } = await getDWalletAddresses(
-          suiClient,
-          wallet.id
-        );
-        if (!isActive) {
-          if (!cancelled) {
-            setActive(false);
-            setLoading(false);
-          }
-          return;
-        }
-        const markets = await fetchTokenMarkets();
-        if (cancelled) return;
-
-        setRows(
-          Object.entries(addresses).map(([chain, address]) => ({
-            chain,
-            symbol: CHAIN_SYMBOLS[chain] || chain,
-            address,
-            logo: markets[chain]?.logo ?? '',
-            dwalletId: wallet.id,
-            dwalletCapId: wallet.capId,
-          }))
-        );
-        setTargets(
-          Object.entries(addresses).map(([chain, address]) => ({ chain, address, curve: curveNumber }))
-        );
-        setLoading(false);
-      } catch (e) {
-        console.error(e);
-        if (!cancelled) {
-          setError(friendlyError(e));
-          setLoading(false);
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [wallet.id, wallet.capId, suiClient]);
-
-  const total = rows.reduce((sum, r) => sum + (balances[r.chain]?.usdValue ?? 0), 0);
-
-  return (
-    <div className="space-y-4">
-      <button
-        onClick={onBack}
-        className="text-sm text-[var(--muted)] hover:text-[var(--foreground)] transition"
-      >
-        ‹ Back to wallets
-      </button>
-
-      <div className="card p-5">
-        <div className="flex items-start justify-between gap-3 mb-4">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <span className="font-bold">{wallet.curve}</span>
-              <StateBadge state={wallet.state} />
-            </div>
-            <code className="text-xs text-[var(--muted)]" title={wallet.id}>
-              {truncate(wallet.id, 14, 10)}
-            </code>
-            {!loading && active && <div className="mono-label mt-1">updated {age}</div>}
-          </div>
-          <div className="flex items-center gap-3 shrink-0">
-            <div className="text-right">
-              <div className="mono-label">Total</div>
-              <div className="text-xl font-extrabold num">${fmtUsd(total)}</div>
-            </div>
-            {active && !loading && (
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => void refresh()}
-                loading={busy}
-                icon={!busy ? <RefreshCw className="w-3.5 h-3.5" aria-hidden /> : undefined}
-                title={`Refresh now — balances also refresh every ${REFRESH_SECONDS}s`}
-              >
-                Refresh
-              </Button>
-            )}
-          </div>
-        </div>
-
-        {loading && (
-          <div className="py-8 flex items-center justify-center gap-3 text-sm text-[var(--muted)]">
-            <Loader2 className="w-4 h-4 animate-spin" aria-hidden /> Deriving addresses…
-          </div>
-        )}
-
-        {!loading && !active && (
-          <p className="py-6 text-center text-sm text-[var(--muted)]">
-            This dWallet isn&apos;t active yet, so addresses can&apos;t be derived. Finish activation first.
-          </p>
-        )}
-
-        {error && (
-          <div className="py-3">
-            <ErrorNote {...error} />
-          </div>
-        )}
-
-        {!loading && active && (
-          <div className="grid sm:grid-cols-2 gap-2">
-            {rows.map((r) => (
-              <ChainRowCard
-                key={r.chain}
-                row={r}
-                balance={balances[r.chain]}
-                zkAddress={account?.address ?? ''}
-              />
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
-  );
 }
 
 function ChainRowCard({
@@ -1005,7 +825,8 @@ function ChainRowCard({
         </Button>
       </div>
 
-      <SendModal
+      {sendOpen && (
+        <SendModal
         open={sendOpen}
         onClose={() => setSendOpen(false)}
         chain={row.chain}
@@ -1018,7 +839,8 @@ function ChainRowCard({
         onSent={() => {
           void import('@/lib/balances/store').then((m) => m.refreshSoon(row.chain));
         }}
-      />
+        />
+      )}
     </div>
   );
 }

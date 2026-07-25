@@ -22,13 +22,12 @@ import { IKA_COIN_TYPE } from '@/lib/config/network';
 const SUI_LOGO = 'https://cryptologos.cc/logos/sui-sui-logo.png';
 const IKA_LOGO = 'https://coin-images.coingecko.com/coins/images/67598/large/ika.jpg?1753770879';
 
-export type NavTab = 'create' | 'wallets' | 'all' | 'sui';
+export type NavTab = 'create' | 'all' | 'sui';
 
-const TABS: { key: NavTab; label: string; short: string }[] = [
-  { key: 'create', label: 'Create', short: 'Create' },
-  { key: 'wallets', label: 'My wallets', short: 'Wallets' },
-  { key: 'all', label: 'All chains', short: 'Chains' },
-  { key: 'sui', label: 'My Sui Wallet', short: 'Sui Wallet' },
+const TABS: { key: NavTab; label: string }[] = [
+  { key: 'create', label: 'Create' },
+  { key: 'all', label: 'All chains' },
+  { key: 'sui', label: 'My Sui Wallet' },
 ];
 
 function fmt(raw: string, decimals: number): string {
@@ -165,10 +164,9 @@ export function NavBar({
                     : 'text-[var(--muted)] hover:text-[var(--foreground)]'
                 }`}
               >
-                {/* Abbreviated between lg and xl: with full labels the row needs ~1030px and
-                    overflows a 1024px window by a few pixels. */}
-                <span className="xl:hidden">{t.short}</span>
-                <span className="hidden xl:inline">{t.label}</span>
+                {/* Three tabs fit at every desktop width, so the abbreviated variants that the
+                    four-tab row needed between lg and xl are gone. */}
+                {t.label}
               </button>
             ))}
           </nav>

@@ -340,7 +340,12 @@ export function Modal({
 
 /* -------------------------------- Skeleton -------------------------------- */
 
-/** Placeholder for a value that hasn't loaded. Announced as busy, not as a zero. */
+/**
+ * Placeholder for a value that hasn't loaded. Announced as busy, not as a zero.
+ *
+ * `block` rather than `inline-block` so it can be a flex child and take `flex-1` — skeleton rows that
+ * mirror a real layout need to stretch the same way the content will.
+ */
 export function Skeleton({ className = 'h-3 w-16' }: { className?: string }) {
-  return <span aria-busy="true" aria-label="Loading" className={`skeleton inline-block ${className}`} />;
+  return <span aria-hidden className={`skeleton block ${className}`} />;
 }
