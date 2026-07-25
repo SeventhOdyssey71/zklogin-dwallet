@@ -24,6 +24,7 @@ import {
 } from "@mysten/sui/zklogin";
 import { Ed25519Keypair, Ed25519PublicKey } from "@mysten/sui/keypairs/ed25519";
 import { fromBase64 } from "@mysten/sui/utils";
+import { SESSION_DURATION_MS, SESSION_EPOCHS } from './duration';
 
 // ─────────────────────────────────────────────────────────────────────────
 // 1. Ephemeral session (BROWSER)
@@ -42,6 +43,8 @@ export interface EphemeralSession {
   maxEpoch: number;
   /** The OAuth `nonce` — Google echoes this into the id_token. */
   nonce: string;
+  /** Epoch ms after which this key is discarded, matching the server session. */
+  expiresAt: number;
 }
 
 /**
@@ -54,7 +57,7 @@ export interface EphemeralSession {
  */
 export function createEphemeralSession(
   currentEpoch: number,
-  epochsValid = 2
+  epochsValid: number = SESSION_EPOCHS
 ): EphemeralSession {
   const keypair = new Ed25519Keypair();
   const randomness = generateRandomness();
@@ -68,6 +71,7 @@ export function createEphemeralSession(
     randomness,
     maxEpoch,
     nonce,
+    expiresAt: Date.now() + SESSION_DURATION_MS,
   };
 }
 

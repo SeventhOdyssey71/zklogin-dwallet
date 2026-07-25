@@ -18,18 +18,11 @@
 import { Transaction } from '@mysten/sui/transactions';
 import type { AppSuiClient } from '@/lib/sui/client';
 import { toBase64 } from '@mysten/sui/utils';
-import { signTxBytes, type EphemeralSession } from '@/lib/zklogin/zklogin';
+import { signTxBytes } from '@/lib/zklogin/zklogin';
 
-// Must match the key used by useZkLogin().
-export const EPH_KEY = 'zk.ephemeral';
-
-export function loadEphemeral(): EphemeralSession | null {
-  try {
-    return JSON.parse(sessionStorage.getItem(EPH_KEY) ?? 'null');
-  } catch {
-    return null;
-  }
-}
+// One implementation, shared with useZkLogin — it also enforces expiry and clears stale keys.
+export { EPH_KEY, loadEphemeral } from '@/lib/zklogin/ephemeralStore';
+import { loadEphemeral } from '@/lib/zklogin/ephemeralStore';
 
 /**
  * The shape `/api/zklogin/execute` returns.

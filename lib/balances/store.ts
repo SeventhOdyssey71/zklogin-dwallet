@@ -21,6 +21,7 @@
  */
 
 import { fetchChainBalance, type Balance } from './fetchers';
+import { recordDetectedReceive } from '@/lib/history/store';
 
 /** How long a cached balance is considered current. */
 const FRESH_MS = 25_000;
@@ -45,6 +46,18 @@ interface Target {
   address: string;
   /** Ika curve number, which decides how the chain is read. */
   curve: number;
+}
+
+/**
+ * The zkLogin address that owns the tracked chains, so detected deposits are filed under the right user.
+ *
+ * Set by the view that registers targets; history is per account, and without it a deposit would have
+ * nowhere to go.
+ */
+let ledgerOwner = '';
+
+export function setHistoryOwner(address: string): void {
+  ledgerOwner = address;
 }
 
 const key = (chain: string, address: string) => `${chain}:${address}`;
@@ -138,6 +151,28 @@ export function read(target: Target, options: { force?: boolean } = {}): Promise
     try {
       const value = await fetchChainBalance(target.chain, target.address, target.curve);
       const entry: Entry = { ...value, at: Date.now(), loading: false };
+
+      /**
+       * A balance that went up is a deposit.
+       *
+       * This is the only place that sees the previous and the new value together, which makes it the
+       * honest place to notice one. Requires a prior *successful* read (`at > 0`): on a first load there
+       * is nothing to compare against, and treating the initial balance as an incoming transfer would
+       * invent history that never happened.
+       */
+      const prior = cached;
+      if (prior?.at && ledgerOwner) {
+        const before = parseFloat(prior.balance) || 0;
+        const after = parseFloat(entry.balance) || 0;
+        if (after > before) {
+          recordDetectedReceive({
+            address: ledgerOwner,
+            chain: target.chain,
+            amount: formatDelta(after - before),
+          });
+        }
+      }
+
       cache.set(k, entry);
       return entry;
     } catch (e) {
@@ -225,11 +260,22 @@ function stopPolling(): void {
   }
 }
 
+/**
+ * Format a balance delta for display.
+ *
+ * Floating-point subtraction of two decimal strings leaves artefacts like 0.30000000000000004, so the
+ * result is rounded to the precision the fetchers actually report and then trimmed.
+ */
+function formatDelta(delta: number): string {
+  return String(Number(delta.toFixed(8)));
+}
+
 /** Drop everything — used on sign-out so one user's balances never appear for the next. */
 export function clearBalances(): void {
   cache.clear();
   inflight.clear();
   targets.clear();
+  ledgerOwner = '';
   stopPolling();
   emit();
 }

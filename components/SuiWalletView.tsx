@@ -18,6 +18,7 @@ import { toast } from 'sonner';
 import { Check } from 'lucide-react';
 import { Button, CopyField, ErrorNote, Skeleton } from '@/components/ui';
 import { friendlyError, type FriendlyError } from '@/lib/ui/errors';
+import { recordSend } from '@/lib/history/store';
 import { zkLoginSignAndExecute } from '@/lib/zklogin/execute';
 import { suiTxUrl, suiObjectUrl, IKA_ACQUIRE_URL } from '@/lib/config/network';
 import {
@@ -119,6 +120,14 @@ export function SuiWalletView({ address }: { address: string }) {
       });
       const { digest } = await zkLoginSignAndExecute(suiClient, address, { transaction: tx });
       setLastDigest(digest);
+      recordSend({
+        address,
+        chain: 'Sui',
+        symbol: asset.symbol,
+        amount,
+        recipient,
+        txHash: digest,
+      });
       toast.success(`Sent ${amount} ${asset.symbol}`, { description: digest.slice(0, 20) + '…' });
       setAmount('');
       setRecipient('');

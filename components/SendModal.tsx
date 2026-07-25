@@ -18,6 +18,7 @@ import { signWithDWallet, broadcastTransaction } from '@/lib/dwallet/clientSideS
 import { zkLoginSignAndExecute } from '@/lib/zklogin/execute';
 import { validateAddress, type AddressCheck } from '@/lib/utils/validateAddress';
 import { friendlyError, type FriendlyError } from '@/lib/ui/errors';
+import { recordSend } from '@/lib/history/store';
 import { txUrl } from '@/lib/config/chainRegistry';
 import { Button, CopyField, ErrorNote, Modal, StatusNote } from '@/components/ui';
 
@@ -277,6 +278,15 @@ export function SendModal({
       }
 
       setTxHash(finalHash);
+      // Recorded from what we broadcast, so History is exact for sends rather than inferred.
+      recordSend({
+        address: zkAddress,
+        chain,
+        symbol,
+        amount,
+        recipient: recipient.trim(),
+        txHash: finalHash,
+      });
       toast.success(`Sent ${amount} ${symbol}`, { description: `on ${chain}` });
       onSent?.();
     } catch (e) {

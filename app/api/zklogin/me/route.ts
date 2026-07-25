@@ -15,5 +15,8 @@ export async function GET() {
     address: s.address,
     email: s.email ?? null,
     name: s.name ?? null,
+    // The client schedules its own sign-out from this, rather than discovering expiry through a
+    // failed transaction.
+    expiresAt: s.expiresAt,
   });
 }

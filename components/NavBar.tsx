@@ -22,11 +22,12 @@ import { IKA_COIN_TYPE } from '@/lib/config/network';
 const SUI_LOGO = 'https://cryptologos.cc/logos/sui-sui-logo.png';
 const IKA_LOGO = 'https://coin-images.coingecko.com/coins/images/67598/large/ika.jpg?1753770879';
 
-export type NavTab = 'create' | 'all' | 'sui';
+export type NavTab = 'create' | 'all' | 'history' | 'sui';
 
 const TABS: { key: NavTab; label: string }[] = [
   { key: 'create', label: 'Create' },
   { key: 'all', label: 'All chains' },
+  { key: 'history', label: 'History' },
   { key: 'sui', label: 'My Sui Wallet' },
 ];
 

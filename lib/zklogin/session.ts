@@ -9,6 +9,7 @@
  */
 
 import { createCipheriv, createDecipheriv, randomBytes, createHash } from "node:crypto";
+import { SESSION_DURATION_MS } from "./duration";
 
 export interface ZkSession {
   jwt: string;
@@ -16,6 +17,8 @@ export interface ZkSession {
   address: string;
   email?: string;
   name?: string;
+  /** Epoch ms after which this session is refused. Sealed in, so it cannot be edited client-side. */
+  expiresAt: number;
 }
 
 export const SESSION_COOKIE = "zk_session";
@@ -36,7 +39,20 @@ export function sealSession(session: ZkSession): string {
   return Buffer.concat([iv, tag, ct]).toString("base64url");
 }
 
-/** Open a sealed cookie value back into a session, or null if invalid/tampered. */
+/** A session sealed now, expiring after the standard duration. */
+export function newSession(fields: Omit<ZkSession, "expiresAt">): ZkSession {
+  return { ...fields, expiresAt: Date.now() + SESSION_DURATION_MS };
+}
+
+/**
+ * Open a sealed cookie value back into a session — or null if invalid, tampered with, or expired.
+ *
+ * Expiry is enforced HERE rather than relying on the cookie's `maxAge`. `maxAge` is a request to the
+ * browser: it governs when the browser stops sending the cookie, not whether the server accepts it. A
+ * client that keeps presenting an old cookie would otherwise stay signed in indefinitely. Because
+ * `expiresAt` sits inside the AES-GCM sealed payload, it cannot be altered without invalidating the
+ * whole token.
+ */
 export function openSession(token: string | undefined | null): ZkSession | null {
   if (!token) return null;
   try {
@@ -47,7 +63,10 @@ export function openSession(token: string | undefined | null): ZkSession | null 
     const decipher = createDecipheriv("aes-256-gcm", key(), iv);
     decipher.setAuthTag(tag);
     const pt = Buffer.concat([decipher.update(ct), decipher.final()]);
-    return JSON.parse(pt.toString("utf8")) as ZkSession;
+    const session = JSON.parse(pt.toString("utf8")) as ZkSession;
+    // A session sealed before `expiresAt` existed has no business surviving a deploy either.
+    if (!session.expiresAt || Date.now() >= session.expiresAt) return null;
+    return session;
   } catch {
     return null;
   }

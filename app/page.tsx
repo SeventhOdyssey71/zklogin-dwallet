@@ -9,7 +9,7 @@ import dynamic from 'next/dynamic';
 import { PresignPoolBadge } from '@/components/PresignPoolBadge';
 import { NavBar, type NavTab } from '@/components/NavBar';
 import { ConnectWallet } from '@/components/ConnectWallet';
-import { useZkLogin } from '@/lib/useZkLogin';
+import { useZkLogin, consumeExpiredNotice } from '@/lib/useZkLogin';
 import { zkLoginSignAndExecute } from '@/lib/zklogin/execute';
 // Types are erased at build time, so importing them costs nothing. `createBothDWallets` is loaded on
 // demand in `handleCreate` — it pulls ethers and the Ika SDK, and nobody needs either until they
@@ -21,6 +21,7 @@ import { IKA_ACQUIRE_URL } from '@/lib/config/network';
 import { CHAINS } from '@/lib/config/chainRegistry';
 import { AllChainChips, useChainAssets, chainCount } from '@/components/ChainChips';
 import { SuiWalletView } from '@/components/SuiWalletView';
+import { HistoryView } from '@/components/HistoryView';
 import { Button, CopyField, ErrorNote, Skeleton } from '@/components/ui';
 import { useBalances, useAgeLabel, REFRESH_SECONDS, type BalanceTarget } from '@/lib/balances/useBalances';
 import type { Entry as BalanceEntry } from '@/lib/balances/store';
@@ -113,7 +114,7 @@ const CHAIN_ORDER = [
   'Polkadot',
 ];
 
-const TAB_KEYS: NavTab[] = ['create', 'all', 'sui'];
+const TAB_KEYS: NavTab[] = ['create', 'all', 'history', 'sui'];
 
 /**
  * Keep the active tab in the URL hash.
@@ -149,6 +150,21 @@ export default function Home() {
   const account: ZkAccount = user ? { address: user.address } : null;
   const [tab, setTab] = useTabFromHash();
 
+  /**
+   * Explain an automatic sign-out.
+   *
+   * Being returned to the homepage with no warning reads as a bug, so the expiry sets a one-shot flag
+   * that this reads (and clears) on arrival. Shown once, not stored — a stale notice on a later visit
+   * would be its own confusion.
+   */
+  useEffect(() => {
+    if (consumeExpiredNotice()) {
+      toast('Session expired', {
+        description: 'Sessions last 48 hours. Sign in again to continue.',
+      });
+    }
+  }, []);
+
   // Signed-out users only have Create; landing on a hash for a signed-in view would show an empty shell.
   const view = account ? tab : 'create';
 
@@ -176,6 +192,7 @@ export default function Home() {
                 <CreateView account={account} onCreated={() => setTab('all')} />
               )}
               {view === 'all' && <AllChainsView account={account} onCreate={() => setTab('create')} />}
+              {view === 'history' && account && <HistoryView address={account.address} />}
               {view === 'sui' && account && <SuiWalletView address={account.address} />}
             </>
           )}
@@ -523,6 +540,9 @@ function AllChainsView({
           };
         })
       );
+      // Detected deposits are filed against the signed-in account.
+      const { setHistoryOwner } = await import('@/lib/balances/store');
+      setHistoryOwner(account.address);
       // Registering the targets is what starts polling; the store fetches them itself.
       setTargets(nextTargets.filter((t) => CHAIN_ORDER.includes(t.chain)));
       setLoading(false);

@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { exchangeCodeForIdToken, verifyGoogleIdToken } from "@/lib/zklogin/google";
 import { getZkLoginWallet } from "@/lib/zklogin/shinami";
-import { sealSession, SESSION_COOKIE } from "@/lib/zklogin/session";
+import { sealSession, newSession, SESSION_COOKIE } from "@/lib/zklogin/session";
+import { SESSION_DURATION_MS } from "@/lib/zklogin/duration";
 
 export const runtime = "nodejs";
 
@@ -34,13 +35,17 @@ export async function GET(req: NextRequest) {
     const res = NextResponse.redirect(new URL("/", url.origin));
     res.cookies.set(
       SESSION_COOKIE,
-      sealSession({ jwt: idToken, salt, address, email: claims.email, name: claims.name }),
+      sealSession(
+        newSession({ jwt: idToken, salt, address, email: claims.email, name: claims.name })
+      ),
       {
         httpOnly: true,
         secure: process.env.NODE_ENV === "production",
         sameSite: "lax",
         path: "/",
-        maxAge: 60 * 60 * 24, // 1 day; re-auth after that
+        // Matches the expiry sealed into the payload, so the browser drops the cookie at the same
+        // moment the server would start refusing it.
+        maxAge: SESSION_DURATION_MS / 1000,
       }
     );
     res.cookies.delete("zk_oauth_state");
