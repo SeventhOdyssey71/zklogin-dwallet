@@ -9,7 +9,7 @@
  * dWallet.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { ArrowRight } from 'lucide-react';
 import { useSuiClient } from '@mysten/dapp-kit';
@@ -46,7 +46,12 @@ interface SendModalProps {
  */
 const MAX_FEE_HEADROOM = 0.02;
 
-export function SendModal({
+/**
+ * Memoised, because the view that renders it re-renders on every balance update — about once a second while
+ * the deposit watcher is seeing EVM blocks. Without this, an open dialog was re-rendering under the user's
+ * cursor and typing felt like it caught. Requires the caller to pass stable callbacks, which it does.
+ */
+export const SendModal = memo(function SendModal({
   open,
   onClose,
   chain,
@@ -534,4 +539,4 @@ export function SendModal({
       )}
     </Modal>
   );
-}
+});

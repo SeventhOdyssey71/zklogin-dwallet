@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, useMemo, useSyncExternalStore } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef, useSyncExternalStore } from 'react';
 import { useSuiClient } from '@mysten/dapp-kit';
 import { toast } from 'sonner';
 import { Loader2 } from 'lucide-react';
@@ -503,6 +503,25 @@ function AllChainsView({
 
   const onSend = useCallback((chain: string) => setSendChain(chain), []);
 
+  /**
+   * Stable identities for the dialog's callbacks.
+   *
+   * Inline arrows are new objects on every render, which defeats `memo` entirely — and this view re-renders
+   * on every balance-store emit, roughly once a second while the deposit watcher is seeing EVM blocks. That
+   * re-rendered the open dialog under the user's cursor, which is what made typing feel like it caught.
+   *
+   * `onSent` reads the chain from a ref rather than closing over it, so its identity never changes.
+   */
+  const sendChainRef = useRef<string | null>(null);
+  sendChainRef.current = sendChain;
+
+  const closeSend = useCallback(() => setSendChain(null), []);
+  const handleSent = useCallback(() => {
+    const chain = sendChainRef.current;
+    if (!chain) return;
+    void import('@/lib/balances/store').then((m) => m.refreshSoon(chain));
+  }, []);
+
   const onReceive = useCallback(
     (chain: string) => {
       const row = rows.find((r) => r.chain === chain);
@@ -609,7 +628,7 @@ function AllChainsView({
       {sendRow && (
         <SendModal
           open
-          onClose={() => setSendChain(null)}
+          onClose={closeSend}
           chain={sendRow.chain}
           symbol={sendRow.symbol}
           fromAddress={sendRow.address}
@@ -617,9 +636,7 @@ function AllChainsView({
           dwalletId={sendRow.dwalletId}
           dwalletCapId={sendRow.dwalletCapId}
           zkAddress={account?.address ?? ''}
-          onSent={() => {
-            void import('@/lib/balances/store').then((m) => m.refreshSoon(sendRow.chain));
-          }}
+          onSent={handleSent}
         />
       )}
     </>

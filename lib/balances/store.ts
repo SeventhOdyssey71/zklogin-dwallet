@@ -62,6 +62,19 @@ export function setHistoryOwner(address: string): void {
 
 const key = (chain: string, address: string) => `${chain}:${address}`;
 
+/**
+ * Consecutive failures per key, so a single blip does not flag a chain as stale.
+ *
+ * The UI's "stale" marker is driven by `error`, and setting it on every failed read made intermittently
+ * flaky chains — NEAR and Scroll especially — blink the marker on and off as reads alternated. Requiring two
+ * failures in a row means a genuinely broken chain is still surfaced, while one dropped request passes
+ * silently, which is what a dropped request deserves.
+ */
+const consecutiveFailures = new Map<string, number>();
+
+/** Failures before a chain is shown as stale. */
+const FAILURES_BEFORE_STALE = 2;
+
 const cache = new Map<string, Entry>();
 const inflight = new Map<string, Promise<Entry>>();
 const targets = new Map<string, Target>();
@@ -171,6 +184,7 @@ export function read(target: Target, options: { force?: boolean } = {}): Promise
     try {
       const value = await fetchChainBalance(target.chain, target.address, target.curve);
       const entry: Entry = { ...value, at: Date.now(), loading: false };
+      consecutiveFailures.delete(k);
 
       /**
        * A balance that went up is a deposit.
@@ -203,12 +217,15 @@ export function read(target: Target, options: { force?: boolean } = {}): Promise
        * it reads as "your funds are gone". The stale value plus an error marker is honest.
        */
       const prior = cache.get(k);
+      const failures = (consecutiveFailures.get(k) ?? 0) + 1;
+      consecutiveFailures.set(k, failures);
       const entry: Entry = {
         balance: prior?.at ? prior.balance : '0',
         usdValue: prior?.at ? prior.usdValue : 0,
         at: prior?.at ?? 0,
         loading: false,
-        error: (e as Error).message,
+        // Only claim staleness once it is a pattern rather than a blip — see FAILURES_BEFORE_STALE.
+        error: failures >= FAILURES_BEFORE_STALE ? (e as Error).message : prior?.error,
       };
       cache.set(k, entry);
       return entry;
@@ -294,6 +311,7 @@ function formatDelta(delta: number): string {
 export function clearBalances(): void {
   cache.clear();
   inflight.clear();
+  consecutiveFailures.clear();
   targets.clear();
   ledgerOwner = '';
   stopPolling();
