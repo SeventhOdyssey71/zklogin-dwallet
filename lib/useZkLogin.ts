@@ -46,9 +46,25 @@ export function consumeExpiredNotice(): boolean {
 
 export function useZkLogin() {
   const [user, setUser] = useState<ZkUser | null>(null);
-  const [loading, setLoading] = useState(true);
+  /**
+   * Start as "loading" only when the user could plausibly be signed in.
+   *
+   * A session needs BOTH halves — the server cookie and the browser's ephemeral key — so the absence of a
+   * local key is proof of signed-out without asking the server. Waiting on /api/zklogin/me regardless meant
+   * every first-time visitor stared at a spinner before the landing page appeared, for a question already
+   * answered locally.
+   */
+  const [loading, setLoading] = useState(() =>
+    typeof window === "undefined" ? true : loadEphemeral() !== null
+  );
 
   const refresh = useCallback(async () => {
+    // Same short-circuit: no local key means no usable session, so skip the request entirely.
+    if (loadEphemeral() === null) {
+      setUser(null);
+      setLoading(false);
+      return;
+    }
     const r = await fetch("/api/zklogin/me").then((r) => r.json());
     /**
      * Both halves must be present.

@@ -1,0 +1,2 @@
+patchedDependencies:
+  '@scure/sr25519@0.2.0': patches/@scure__sr25519@0.2.0.patch

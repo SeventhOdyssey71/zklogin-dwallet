@@ -16,6 +16,7 @@
 
 import { NextResponse } from 'next/server';
 import { CHAINS, coingeckoCoinIds, coingeckoPlatformIds } from '@/lib/config/chainRegistry';
+import { cacheGet, cacheSet } from '@/lib/cache/redis';
 
 export const revalidate = 300;
 
@@ -57,7 +58,29 @@ async function timed<T>(url: string, ms = 10_000): Promise<T | null> {
   }
 }
 
+/**
+ * Shared cache key and TTL.
+ *
+ * CoinGecko's free tier rate-limits hard, and every browser tab asks for this. Next's own route cache is
+ * per instance, so on a scaled deployment each instance was making its own CoinGecko calls; a shared
+ * Redis entry means one call serves every instance. Prices move slowly enough that a minute is plenty, and
+ * chain logos essentially never change.
+ */
+const CACHE_KEY = 'chain-assets:v1';
+const CACHE_TTL_SECONDS = 60;
+
 export async function GET() {
+  // A shared hit skips CoinGecko entirely — including at build time, where this route is prerendered.
+  const shared = await cacheGet<Record<string, ChainAsset>>(CACHE_KEY);
+  if (shared) {
+    return NextResponse.json(shared, {
+      headers: {
+        'Cache-Control': 'public, max-age=60, stale-while-revalidate=900',
+        'X-Cache': 'redis',
+      },
+    });
+  }
+
   const coinIds = coingeckoCoinIds();
   const platformIds = new Set(coingeckoPlatformIds());
 
@@ -101,7 +124,20 @@ export async function GET() {
     };
   }
 
+  /**
+   * Only cache a useful answer.
+   *
+   * If CoinGecko was unreachable, `out` is a skeleton of zero prices and empty logos. Caching that would
+   * pin a broken payload in front of every instance for the whole TTL, which is far worse than letting the
+   * next request try again.
+   */
+  const priced = Object.values(out).filter((a) => a.price > 0).length;
+  if (priced > 0) cacheSet(CACHE_KEY, out, CACHE_TTL_SECONDS);
+
   return NextResponse.json(out, {
-    headers: { 'Cache-Control': 'public, max-age=300, stale-while-revalidate=900' },
+    headers: {
+      'Cache-Control': 'public, max-age=60, stale-while-revalidate=900',
+      'X-Cache': priced > 0 ? 'miss' : 'degraded',
+    },
   });
 }

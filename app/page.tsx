@@ -8,7 +8,6 @@ import { Check, Loader2, RefreshCw } from 'lucide-react';
 import dynamic from 'next/dynamic';
 import { PresignPoolBadge } from '@/components/PresignPoolBadge';
 import { NavBar, type NavTab } from '@/components/NavBar';
-import { ConnectWallet } from '@/components/ConnectWallet';
 import { useZkLogin, consumeExpiredNotice } from '@/lib/useZkLogin';
 import { zkLoginSignAndExecute } from '@/lib/zklogin/execute';
 // Types are erased at build time, so importing them costs nothing. `createBothDWallets` is loaded on
@@ -17,11 +16,11 @@ import { zkLoginSignAndExecute } from '@/lib/zklogin/execute';
 import type { CreateStep, CreatedDWallet } from '@/lib/ika/createDWallet';
 import { ALL_KINDS, type DWalletKind } from '@/lib/ika/curves';
 import { listDWallets } from '@/lib/ika/listDWallets';
-import { IKA_ACQUIRE_URL } from '@/lib/config/network';
 import { CHAINS } from '@/lib/config/chainRegistry';
 import { AllChainChips, useChainAssets, chainCount } from '@/components/ChainChips';
 import { SuiWalletView } from '@/components/SuiWalletView';
 import { HistoryView } from '@/components/HistoryView';
+import { Landing } from '@/components/Landing';
 import { Button, CopyField, ErrorNote, Skeleton } from '@/components/ui';
 import { useBalances, useAgeLabel, REFRESH_SECONDS, type BalanceTarget } from '@/lib/balances/useBalances';
 import type { Entry as BalanceEntry } from '@/lib/balances/store';
@@ -165,8 +164,9 @@ export default function Home() {
     }
   }, []);
 
-  // Signed-out users only have Create; landing on a hash for a signed-in view would show an empty shell.
+  // Signed-out users get the landing page; a hash for a signed-in view would otherwise render an empty shell.
   const view = account ? tab : 'create';
+  const signedOut = !loading && !account;
 
   return (
     <main className="relative z-10 min-h-screen flex flex-col">
@@ -178,14 +178,16 @@ export default function Home() {
           data-dense views take the full container width. */}
       <section
         className={`flex-1 flex justify-center px-4 sm:px-6 py-8 ${
-          view === 'create' ? 'items-center' : 'items-start'
+          view === 'create' && !signedOut ? 'items-center' : 'items-start'
         }`}
       >
-        <div className={`w-full mx-auto ${view === 'create' ? 'max-w-3xl' : 'max-w-7xl'}`}>
+        <div className={`w-full mx-auto ${view === 'create' && !signedOut ? 'max-w-3xl' : 'max-w-7xl'}`}>
           {loading ? (
             <div className="card p-10 flex items-center justify-center gap-3 text-sm text-[var(--muted)]">
               <Loader2 className="w-4 h-4 animate-spin" aria-hidden /> Restoring your session…
             </div>
+          ) : signedOut ? (
+            <Landing />
           ) : (
             <>
               {view === 'create' && (
@@ -292,13 +294,13 @@ function CreateView({
   return (
     <>
       <div className="mb-6 text-center">
-        <div className="mono-label mb-2">Ika 2PC-MPC v4 · Sui mainnet</div>
+        <div className="mono-label mb-2">Step 3 of 3 · one-time setup</div>
         <h1 className="text-2xl sm:text-3xl md:text-4xl font-extrabold tracking-tight leading-tight text-balance">
-          One wallet. {chainCount()} chains.
+          Create your {chainCount()} wallets
         </h1>
         <p className="text-[var(--muted)] text-sm mt-2.5 max-w-lg mx-auto">
-          Keys split across the Ika network — no single party ever holds one. Send and receive on
-          every chain below.
+          One transaction generates the keys behind every chain below. They are split across the Ika
+          network, so no single party ever holds one.
         </p>
         <PresignPoolBadge />
         <div className="mt-3 flex flex-wrap items-center justify-center gap-x-1.5 text-[11px] text-[var(--muted)]">
@@ -311,33 +313,6 @@ function CreateView({
       </div>
 
       <AnimatePresence mode="wait">
-        {!account && (
-          <motion.div
-            key="connect"
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -8 }}
-            className="card p-8 flex flex-col items-center gap-5 text-center"
-          >
-            <p className="text-sm text-[var(--muted)]">
-              Sign in with Google — your Sui mainnet address is derived via zkLogin (no wallet, no
-              seed phrase). Fund that address with{' '}
-              <b className="text-[var(--foreground)]">SUI</b> (gas) and{' '}
-              <b className="text-[var(--foreground)]">IKA</b> (2PC-MPC session fees) to create
-              dWallets.
-            </p>
-            <ConnectWallet />
-            <a
-              href={IKA_ACQUIRE_URL}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-xs underline"
-            >
-              Swap SUI → IKA on Cetus →
-            </a>
-          </motion.div>
-        )}
-
         {account && !creating && !result && (
           <motion.div
             key="picker"

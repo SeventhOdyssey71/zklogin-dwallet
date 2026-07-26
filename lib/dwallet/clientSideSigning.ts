@@ -34,7 +34,6 @@ import { MAINNET_CHAINS, SOLANA_MAINNET, txExplorerUrl } from '@/lib/config/chai
 
 // Re-export types for backwards compatibility
 export type { SignTransactionParams, SignedTransactionResult } from './core/types';
-export { initializeClientSideSigning } from './core/client';
 
 /**
  * Polling cadence for MPC session state (presign, sign).

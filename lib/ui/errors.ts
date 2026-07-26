@@ -28,6 +28,21 @@ interface Rule {
 
 const RULES: Rule[] = [
   {
+    /**
+     * The Ika network's on-chain parameters have moved past what the published SDK can read.
+     *
+     * `reconfiguration_public_output_to_protocol_pp` fails with "invalid value: integer 3, expected variant
+     * index 0 <= i < 2" for EVERY curve, including secp256k1 — so it is not our dWallet or our call, it is a
+     * variant inside the network's reconfiguration output that @ika.xyz/ika-wasm 0.2.1 does not know about.
+     * Both it and @ika.xyz/sdk 0.4.1 are the latest published versions, so there is no upgrade to take and
+     * nothing application code can do. Saying so plainly beats showing a wasm deserialisation error.
+     */
+    match: /expected variant index|reconfiguration_public_output|networkDkgPublicOutput/i,
+    message: 'The Ika network has updated its parameters beyond what the current SDK can read.',
+    action:
+      'Signing is unavailable until @ika.xyz/sdk publishes an update. Your funds and dWallets are unaffected — this only blocks new signatures.',
+  },
+  {
     match: /Not enough SUI for gas/i,
     message: 'Not enough SUI to pay for gas.',
     action: 'Top up the SUI balance on your zkLogin address, then try again.',
