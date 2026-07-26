@@ -401,6 +401,21 @@ function AllChainsView({
       // Detected deposits are filed against the signed-in account.
       const { setHistoryOwner } = await import('@/lib/balances/store');
       setHistoryOwner(account.address);
+
+      /**
+       * Start resolving protocol public parameters now.
+       *
+       * This was 35s of a 48.5s send — 72% — because it began when the send dialog opened and could not
+       * finish before the user pressed Send. It depends on neither the transaction nor the dWallet, so
+       * starting it here hands it the whole time someone spends looking at their balances.
+       */
+      if (ecdsa || eddsa) {
+        const [{ warmSigning }, { getIkaClient }] = await Promise.all([
+          import('@/lib/ika/warmSigning'),
+          import('@/lib/ika/ikaClient'),
+        ]);
+        warmSigning(await getIkaClient(suiClient), suiClient);
+      }
       // Registering the targets is what starts polling; the store fetches them itself.
       setTargets(nextTargets.filter((t) => CHAIN_ORDER.includes(t.chain)));
       setLoading(false);

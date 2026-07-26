@@ -466,3 +466,23 @@ sat/vB rate — verified to predict the serialized size to the byte.
 
 Reference: <https://docs.sui.io/concepts/cryptography/zklogin> ·
 <https://docs.shinami.com/api-docs/sui/wallet-services/zklogin-wallet-api> · <https://docs.ika.xyz>
+
+## Known build-time notice
+
+```
+[baseline-browser-mapping] The data in this module is over two months old.
+To ensure accurate Baseline data, please update: `npm i baseline-browser-mapping@latest -D`
+```
+
+**This cannot be fixed by following its own advice, and installing the package does nothing.** The message
+is emitted from `node_modules/next/dist/compiled/browserslist/index.js` — Next.js *vendors* browserslist and
+its Baseline dataset into its own compiled bundle, so the copy printing the warning is inlined and
+unreachable from `package.json`.
+
+Verified: `baseline-browser-mapping@2.11.3` is current (published the day before this note), and adding it
+as a devDependency plus a `pnpm.overrides` entry deduplicated the tree to that single version — and the
+warning was still printed 16 times per build. Both changes were reverted as ineffective.
+
+It is a freshness notice about browser-support data used for CSS target selection. It does not affect
+correctness, output, or runtime behaviour. It will disappear when Next.js ships a build with refreshed
+vendored data.

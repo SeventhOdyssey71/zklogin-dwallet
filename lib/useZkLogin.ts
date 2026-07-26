@@ -20,6 +20,7 @@ import { clearDWalletMeta } from "@/lib/dwallet/dwalletMeta";
 import { clearBalances } from "@/lib/balances/store";
 import { clearUserShares } from "@/lib/ika/userShare";
 import { clearHistory } from "@/lib/history/store";
+import { clearSigningWarmup } from "@/lib/ika/warmSigning";
 
 export interface ZkUser {
   address: string;
@@ -107,6 +108,7 @@ export function useZkLogin() {
     clearUserShares();
     // History is per account and sits in localStorage, so it would otherwise greet the next user.
     clearHistory();
+    clearSigningWarmup();
     await fetch("/api/zklogin/logout", { method: "POST" }).catch(() => {});
     setUser(null);
 

@@ -51,5 +51,5 @@
     "tailwindcss": "^4",
     "typescript": "^5"
   },
-  "description": "ycos — your chain on sui. zkLogin multi-chain wallet secured by Ika 2PC-MPC."
+  "description": "ycos \u2014 your chain on sui. zkLogin multi-chain wallet secured by Ika 2PC-MPC."
 }
