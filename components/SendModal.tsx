@@ -128,6 +128,16 @@ export function SendModal({
         // another ~2-4s off the first send. Independent of the presignature, so run it alongside.
         void prewarmZkLoginProof();
 
+        /**
+         * Load the address validator's crypto library now.
+         *
+         * The first call to `validateAddress` dynamically imports ethers, @solana/web3.js or
+         * @scure/btc-signer depending on the chain, and that import landed on the user's first keystroke
+         * — a visible hitch at the worst moment. Doing it on open means the field validates instantly
+         * from the first character.
+         */
+        void validateAddress(chain, '0x0000000000000000000000000000000000000000').catch(() => {});
+
         const { curve, signatureAlgorithm } = chainCrypto(chain);
         const ika = await getIkaClient(suiClient);
         const dWallet = (await ika.getDWallet(dwalletId)) as {

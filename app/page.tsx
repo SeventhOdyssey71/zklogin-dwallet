@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, memo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useSuiClient } from '@mysten/dapp-kit';
 import { toast } from 'sonner';
@@ -492,7 +492,6 @@ function AllChainsView({
    * one had finished.
    */
   const { balances, busy, updatedAt, refresh } = useBalances(targets);
-  const age = useAgeLabel(updatedAt);
 
   const load = useCallback(async () => {
     if (!account) return;
@@ -630,7 +629,11 @@ function AllChainsView({
         <div className="min-w-0">
           <h1 className="text-2xl font-extrabold tracking-tight">All chains</h1>
           <div className="mono-label mt-1">
-            {loading ? 'Finding your addresses…' : `${rows.length} chains · updated ${age}`}
+            {loading ? (
+              'Finding your addresses…'
+            ) : (
+              <UpdatedAgo updatedAt={updatedAt} count={rows.length} />
+            )}
           </div>
         </div>
         <div className="flex items-center gap-3 shrink-0">
@@ -728,6 +731,19 @@ function ChainCardSkeleton() {
   );
 }
 
+/**
+ * The "updated 12s ago" label, which owns its own ticking.
+ *
+ * This has to be a leaf component. `useAgeLabel` sets state every second, so calling it inside
+ * `AllChainsView` re-rendered that whole subtree — all fourteen chain cards and any open send dialog —
+ * once per second, for ever. Typing into a field inside a tree that re-renders at 1Hz is exactly what
+ * made the inputs feel like they were catching. Here the state change is confined to this text node.
+ */
+function UpdatedAgo({ updatedAt, count }: { updatedAt: number; count: number }) {
+  const age = useAgeLabel(updatedAt);
+  return <>{`${count} chains · updated ${age}`}</>;
+}
+
 function MissingCurveNote({ label, onCreate }: { label: string; onCreate: () => void }) {
   return (
     <div className="card p-3 flex items-center justify-between gap-3">
@@ -757,7 +773,16 @@ interface ChainRow {
   dwalletCapId: string;
 }
 
-function ChainRowCard({
+/**
+ * One chain row.
+ *
+ * Memoised because the balance store emits on every read — start and finish, for every chain, on each
+ * 30-second poll — and without this all fourteen cards re-rendered each time, including one containing
+ * an open send dialog with focus in a text field. Props are compared by identity and the store hands back
+ * the same `Entry` object until that chain's value actually changes, so only rows that really moved
+ * re-render.
+ */
+const ChainRowCard = memo(function ChainRowCard({
   row,
   balance,
   zkAddress,
@@ -863,5 +888,5 @@ function ChainRowCard({
       )}
     </div>
   );
-}
+});
 

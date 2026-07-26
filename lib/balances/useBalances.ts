@@ -77,10 +77,12 @@ export function useBalances(targets: BalanceTarget[]): UseBalancesResult {
 }
 
 /**
- * "updated 12s ago", ticking without re-rendering the whole tree.
+ * "updated 12s ago", ticking once a second.
  *
- * Kept separate from `useBalances` so the label can update every second while the balance rows — which
- * only change when a value actually changes — stay still.
+ * IMPORTANT: call this from a LEAF component that renders nothing but the label. It sets state every
+ * second, so calling it from a view that renders a list re-renders that entire list at 1Hz — which is
+ * how the send dialog's inputs came to feel like they were catching while being typed into. See
+ * `UpdatedAgo` in app/page.tsx for the intended shape.
  */
 export function useAgeLabel(updatedAt: number): string {
   const [, tick] = useState(0);

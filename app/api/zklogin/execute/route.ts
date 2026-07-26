@@ -13,37 +13,11 @@ import {
 export const runtime = "nodejs";
 
 /**
- * Proof cache — the Groth16 proof (`createZkLoginProof`, ~2-4s and rate-limited to ~2/min/address)
- * is valid for the WHOLE ephemeral session (until `maxEpoch`) and only depends on
- * (ephemeralPubKey, maxEpoch, salt/jwt/randomness) — NOT on the transaction. So we mint it once and
- * reuse it across every send; only the cheap `userSignature` changes per tx.
- *
- * Keyed by ephemeralPubKey:maxEpoch:salt. We store the in-flight Promise so two near-simultaneous
- * sends (e.g. a presignature purchase + a sign) share one mint instead of racing into the rate limit.
- * On failure the entry is evicted so the next attempt re-mints.
- *
- * WHY IT HANGS OFF globalThis
- * ---------------------------
- * A plain module-level `Map` is discarded whenever Next.js hot-reloads this route, so in development
- * every code edit silently reintroduced a 2-4s proof mint on the next transaction — and it looked like
- * network latency rather than a lost cache. `globalThis` survives module re-evaluation, so the cache
- * lives as long as the server process.
- *
- * Still per-instance: on scaled/serverless deployments each cold instance mints once. For a hard
- * cross-instance guarantee, back this with Redis/KV keyed exactly the same way.
+ * The Groth16 proof is cached and reused for the whole session — see lib/zklogin/proofCache.ts for why
+ * that is sound (it depends only on the ephemeral key, maxEpoch and salt, never on the transaction) and
+ * how it degrades when Redis is absent.
  */
-type CachedProof = {
-  proofCore: Awaited<ReturnType<typeof createZkLoginProof>>;
-  addressSeed: string;
-};
-const globalForProofs = globalThis as typeof globalThis & {
-  __zkProofCache?: Map<string, Promise<CachedProof>>;
-};
-const proofCache: Map<string, Promise<CachedProof>> = (globalForProofs.__zkProofCache ??= new Map());
-
-function proofKey(ephemeralPubKeyB64: string, maxEpoch: number, salt: string): string {
-  return `${ephemeralPubKeyB64}:${maxEpoch}:${salt}`;
-}
+import { getOrMintProof, proofKey, type CachedProof } from "@/lib/zklogin/proofCache";
 
 /**
  * POST /api/zklogin/execute
@@ -86,28 +60,21 @@ export async function POST(req: NextRequest) {
   ) as { sub: string; aud: string };
 
   try {
-    // Reuse the session's proof if we've already minted it; otherwise mint once and cache.
     const key = proofKey(ephemeralPubKeyB64, maxEpoch, session.salt);
-    let pending = proofCache.get(key);
-    const cached = pending !== undefined;
-    if (!pending) {
-      pending = (async (): Promise<CachedProof> => {
-        const proofCore = await createZkLoginProof({
-          jwt: session.jwt,
-          maxEpoch,
-          extendedEphemeralPublicKey: extendedEphemeralPublicKey(ephemeralPubKeyB64),
-          jwtRandomness: randomness,
-          salt: session.salt,
-        });
-        return {
-          proofCore,
-          addressSeed: addressSeed({ salt: session.salt, sub: claims.sub, aud: claims.aud }),
-        };
-      })();
-      proofCache.set(key, pending);
-      // Don't cache failures — let the next attempt re-mint.
-      pending.catch(() => proofCache.delete(key));
-    }
+    type ProofCore = Awaited<ReturnType<typeof createZkLoginProof>>;
+    const mint = async (): Promise<CachedProof<ProofCore>> => {
+      const proofCore = await createZkLoginProof({
+        jwt: session.jwt,
+        maxEpoch,
+        extendedEphemeralPublicKey: extendedEphemeralPublicKey(ephemeralPubKeyB64),
+        jwtRandomness: randomness,
+        salt: session.salt,
+      });
+      return {
+        proofCore,
+        addressSeed: addressSeed({ salt: session.salt, sub: claims.sub, aud: claims.aud }),
+      };
+    };
 
     /**
      * Pre-warm: mint the proof now so the first real transaction doesn't pay for it.
@@ -117,11 +84,13 @@ export async function POST(req: NextRequest) {
      * screen takes it off the critical path completely.
      */
     if (prewarmOnly) {
-      await pending;
-      return NextResponse.json({ prewarmed: true, cached });
+      const { source } = await getOrMintProof(key, mint);
+      return NextResponse.json({ prewarmed: true, source });
     }
 
-    const { proofCore, addressSeed: seed } = await pending;
+    const {
+      proof: { proofCore, addressSeed: seed },
+    } = await getOrMintProof(key, mint);
 
     const signature = assembleSignature({
       proof: { ...proofCore, addressSeed: seed },

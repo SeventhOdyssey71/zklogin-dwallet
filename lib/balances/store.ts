@@ -76,8 +76,28 @@ export function subscribe(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
+/**
+ * Notify subscribers, coalescing bursts into one render.
+ *
+ * A poll touches fourteen chains and each `read` emits twice — once when it starts, once when it settles
+ * — so a single refresh fired ~28 notifications. They arrive from separate promise callbacks, so React
+ * cannot batch them automatically, and each one re-rendered the chain list. Collapsing them into one
+ * frame turns a visible stutter into a single update, which matters most while someone is typing in the
+ * send dialog.
+ */
+let emitScheduled = false;
+
 function emit(): void {
-  for (const l of listeners) l();
+  if (emitScheduled) return;
+  emitScheduled = true;
+  const flush = () => {
+    emitScheduled = false;
+    for (const l of listeners) l();
+  };
+  // A frame is the right granularity: nothing visual can happen sooner, and it guarantees a flush even
+  // in a background tab where rAF is paused.
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(flush);
+  else setTimeout(flush, 16);
 }
 
 /** Current value for a chain, or undefined if never fetched. */
