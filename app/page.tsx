@@ -1,6 +1,7 @@
 import { cookies } from 'next/headers';
 import { openSession, SESSION_COOKIE } from '@/lib/zklogin/session';
 import { AppShell } from './AppShell';
+import { ZkLoginProvider } from '@/lib/useZkLogin';
 
 /**
  * Server component, purely so the landing page is in the server-rendered HTML.
@@ -20,5 +21,9 @@ import { AppShell } from './AppShell';
 export default async function Page() {
   const jar = await cookies();
   const initiallySignedIn = openSession(jar.get(SESSION_COOKIE)?.value) !== null;
-  return <AppShell initiallySignedIn={initiallySignedIn} />;
+  return (
+    <ZkLoginProvider initiallySignedIn={initiallySignedIn}>
+      <AppShell initiallySignedIn={initiallySignedIn} />
+    </ZkLoginProvider>
+  );
 }

@@ -53,6 +53,15 @@ const POLL_MS = 5_000;
 /** Give up polling after this. The swap continues regardless; only our watching stops. */
 const POLL_TIMEOUT_MS = 10 * 60 * 1000;
 
+/**
+ * Amount used to discover the route minimum, in lamports.
+ *
+ * Deliberately just under the real floor (~1,389,250) rather than trivially small: the service only names the
+ * minimum for amounts in that neighbourhood, and answers anything far below it with an unhelpful generic
+ * error. Nothing is reserved — the probe is a dry quote.
+ */
+const MINIMUM_PROBE_LAMPORTS = 1_000_000;
+
 type Phase = 'idle' | 'quoting' | 'signing' | 'watching' | 'done';
 
 export function MoveSolToSui({
@@ -100,8 +109,48 @@ export function MoveSolToSui({
   const available = liveBalance === null ? null : parseFloat(liveBalance) || 0;
   const requested = parseFloat(amount) || 0;
   const overBalance = available !== null && requested > available;
+  // Compared at full precision; only the DISPLAY is rounded, and upward — see where it is rendered.
   const belowMinimum = minimum !== null && requested > 0 && requested < minimum;
   const canQuote = requested > 0 && !overBalance && phase === 'idle';
+
+  /**
+   * Learn the route's minimum once, before the user has typed anything.
+   *
+   * The service reports it in the rejection text — but only for amounts NEAR the minimum. Ask for something
+   * far below it and the reply is a bare "Failed to get quote" with no number in it, which is how a perfectly
+   * ordinary "that's too small" turned into a red failure the user could do nothing about.
+   *
+   * So the minimum is discovered deliberately rather than by accident: one dry probe at an amount chosen to
+   * be under the floor but not absurdly so, which is the range that produces the informative message. Knowing
+   * it up front means small amounts are answered with guidance instead of an error, and the request that
+   * would have failed is never sent.
+   */
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      try {
+        const sol = await findAsset('sol', 'SOL');
+        if (!sol) return;
+        await quote({
+          originAsset: sol.assetId,
+          destinationAsset: (await findAsset('sui', 'SUI'))?.assetId ?? '',
+          amount: String(MINIMUM_PROBE_LAMPORTS),
+          refundTo: solanaAddress,
+          recipient: suiAddress,
+          slippageBps: SLIPPAGE_BPS,
+          dry: true,
+        });
+        // It priced the probe, so the floor is at or below it. Nothing to warn about.
+      } catch (e) {
+        const min = /at least (\d+)/.exec((e as Error).message ?? '');
+        if (live && min) setMinimum(Number(min[1]) / 1e9);
+        // No number in the message: leave `minimum` unknown and fall back to reporting failures as they come.
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [solanaAddress, suiAddress]);
 
   /**
    * Price the route as the user types, without reserving anything.
@@ -120,6 +169,18 @@ export function MoveSolToSui({
     const timer = setTimeout(async () => {
       if (requested <= 0 || overBalance) {
         if (live) setPreview(null);
+        return;
+      }
+      /**
+       * Below a known minimum there is nothing to ask. The service would reject it, and for small enough
+       * amounts that rejection carries no explanation — so answering from what we already know is both
+       * faster and more useful than relaying the failure.
+       */
+      if (minimum !== null && requested < minimum) {
+        if (live) {
+          setPreview(null);
+          setError(null);
+        }
         return;
       }
       try {
@@ -159,7 +220,7 @@ export function MoveSolToSui({
       live = false;
       clearTimeout(timer);
     };
-  }, [requested, overBalance, solanaAddress, suiAddress]);
+  }, [requested, overBalance, minimum, solanaAddress, suiAddress]);
 
   const watch = useCallback(
     async (depositAddress: string) => {
@@ -356,9 +417,10 @@ export function MoveSolToSui({
             {overBalance && (
               <p className="mt-1 text-xs text-[var(--danger)]">More than this account holds.</p>
             )}
+            {/* Rounded UP: showing a truncated minimum would name an amount that still gets rejected. */}
             {belowMinimum && (
               <p className="mt-1 text-xs text-[var(--danger)]">
-                Below the service minimum of {minimum} SOL.
+                Below the service minimum of {Math.ceil(minimum * 1e6) / 1e6} SOL.
               </p>
             )}
           </div>

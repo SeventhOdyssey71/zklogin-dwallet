@@ -9,7 +9,7 @@
  * httpOnly cookie. To sign a transaction, see `lib/zklogin/execute.ts::zkLoginSignAndExecute`.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { createEphemeralSession } from "@/lib/zklogin/zklogin";
 import { clearEphemeral, loadEphemeral, saveEphemeral } from "@/lib/zklogin/ephemeralStore";
 import { hasExpired, msUntil } from "@/lib/zklogin/duration";
@@ -45,19 +45,23 @@ export function consumeExpiredNotice(): boolean {
   }
 }
 
-export function useZkLogin() {
+function useZkLoginState(initiallySignedIn: boolean) {
   const [user, setUser] = useState<ZkUser | null>(null);
   /**
    * Start as "loading" only when the user could plausibly be signed in.
    *
-   * A session needs BOTH halves — the server cookie and the browser's ephemeral key — so the absence of a
-   * local key is proof of signed-out without asking the server. Waiting on /api/zklogin/me regardless meant
-   * every first-time visitor stared at a spinner before the landing page appeared, for a question already
-   * answered locally.
+   * A session needs BOTH halves — the server cookie and the browser's ephemeral key — so a visitor with
+   * neither is provably signed out and should never wait on /api/zklogin/me to be told so. That is why this
+   * is seeded rather than simply `true`: a first-time visitor renders the landing page immediately.
+   *
+   * The seed comes from the SERVER's view of the cookie, and deliberately not from `loadEphemeral()`.
+   * Branching on `typeof window` here produced a real hydration mismatch — the server rendered the loading
+   * placeholder while the browser's first render, seeing no local key, rendered the sign-in button, so React
+   * discarded and re-rendered the tree. The server cannot see sessionStorage, so the only value both sides
+   * can agree on at first render is the one the server sent. The missing local key is then caught a moment
+   * later by `refresh`, which treats a cookie without a key as signed out.
    */
-  const [loading, setLoading] = useState(() =>
-    typeof window === "undefined" ? true : loadEphemeral() !== null
-  );
+  const [loading, setLoading] = useState(initiallySignedIn);
 
   const refresh = useCallback(async () => {
     // Same short-circuit: no local key means no usable session, so skip the request entirely.
@@ -132,13 +136,14 @@ export function useZkLogin() {
    * the tab becomes visible or regains focus, which covers exactly those cases.
    */
   const expiresAt = user?.expiresAt;
-  const signOutRef = useRef(signOut);
-  signOutRef.current = signOut;
 
   useEffect(() => {
     if (!expiresAt) return;
 
-    const expireNow = () => void signOutRef.current({ expired: true });
+    // `signOut` is a stable useCallback, so it can be depended on directly. It used to be held in a ref that
+    // was reassigned during render — a ref write in the render phase, which React does not allow and which
+    // bought nothing over depending on a value that never changes.
+    const expireNow = () => void signOut({ expired: true });
     if (hasExpired(expiresAt)) {
       expireNow();
       return;
@@ -156,7 +161,43 @@ export function useZkLogin() {
       document.removeEventListener("visibilitychange", check);
       window.removeEventListener("focus", check);
     };
-  }, [expiresAt]);
+  }, [expiresAt, signOut]);
 
-  return { user, loading, signIn, signOut, refresh };
+  return useMemo(
+    () => ({ user, loading, signIn, signOut, refresh }),
+    [user, loading, signIn, signOut, refresh]
+  );
+}
+
+type ZkLoginValue = ReturnType<typeof useZkLoginState>;
+
+const ZkLoginContext = createContext<ZkLoginValue | null>(null);
+
+/**
+ * Owns the single zkLogin session for the app.
+ *
+ * One instance, not one per consumer. Each `useZkLoginState` runs its own `/api/zklogin/me` request and its
+ * own expiry timer, so two components calling it independently meant the session was fetched twice and, at
+ * the moment it expired, signed out twice — two logout requests racing one redirect. It also gave the two
+ * copies separate `loading` states that could disagree on screen.
+ *
+ * `initiallySignedIn` is the server's read of the session cookie. It is a rendering hint only; every API
+ * route still opens and validates the sealed cookie itself.
+ */
+export function ZkLoginProvider({
+  initiallySignedIn,
+  children,
+}: {
+  initiallySignedIn: boolean;
+  children: React.ReactNode;
+}) {
+  const value = useZkLoginState(initiallySignedIn);
+  return <ZkLoginContext.Provider value={value}>{children}</ZkLoginContext.Provider>;
+}
+
+/** The shared zkLogin session. Must be rendered under `ZkLoginProvider`. */
+export function useZkLogin(): ZkLoginValue {
+  const value = useContext(ZkLoginContext);
+  if (!value) throw new Error("useZkLogin must be used within <ZkLoginProvider>");
+  return value;
 }
