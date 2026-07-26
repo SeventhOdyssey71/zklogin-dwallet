@@ -166,20 +166,51 @@ export async function ensureProtocolPublicParameters(
         `protocol public parameters are the same value (see lib/ika/protocolParams.ts).`
     );
 
-    const cache = (
-      ikaClient as unknown as { cachedProtocolPublicParameters: Map<string, CachedParams> }
+    /**
+     * Prime the SDK's own memo, defensively.
+     *
+     * This reaches into a private field, which is the only seam available — `requestSign` calls
+     * `getProtocolPublicParameters` internally with no way to pass parameters in. If a future SDK renames or
+     * restructures it, a bare `cache.set` would throw a TypeError and take down a resolve that had otherwise
+     * just succeeded. So the shape is checked, and a mismatch degrades instead: the caller still receives
+     * valid parameters, and only the SDK's internal call would fail — with a message that says exactly what
+     * broke and what to do, rather than an anonymous crash somewhere in signing.
+     */
+    const seam = (
+      ikaClient as unknown as {
+        cachedProtocolPublicParameters?: Map<string, CachedParams> | undefined;
+      }
     ).cachedProtocolPublicParameters;
-    // `getCacheKey` is `${encryptionKeyID}-${curve}`, replicated rather than called because it is a
-    // private method and genuinely unreachable, unlike the field.
-    cache.set(`${encryptionKey.id}-${selectedCurve}`, {
-      networkEncryptionKeyPublicOutputID: encryptionKey.networkDKGOutputID,
-      epoch: encryptionKey.epoch,
-      curve: selectedCurve,
-      protocolPublicParameters,
-    });
+
+    if (seam instanceof Map) {
+      // `getCacheKey` is `${encryptionKeyID}-${curve}`, replicated rather than called because it is a
+      // private method and genuinely unreachable, unlike the field.
+      seam.set(`${encryptionKey.id}-${selectedCurve}`, {
+        networkEncryptionKeyPublicOutputID: encryptionKey.networkDKGOutputID,
+        epoch: encryptionKey.epoch,
+        curve: selectedCurve,
+        protocolPublicParameters,
+      });
+    } else {
+      warnOnce(
+        'seam-gone',
+        '[ika] IkaClient.cachedProtocolPublicParameters is no longer a Map, so the workaround cannot prime ' +
+          'the SDK cache. Signing will fail inside requestSign until either @ika.xyz/ika-wasm can read the ' +
+          'current reconfiguration format (making the workaround unnecessary) or this priming is updated to ' +
+          'the new internal shape. See lib/ika/protocolParams.ts.'
+      );
+    }
 
     return protocolPublicParameters;
   }
+}
+
+/** Log at most once per process per key — a broken seam would otherwise print on every single send. */
+const warned = new Set<string>();
+function warnOnce(key: string, message: string): void {
+  if (warned.has(key)) return;
+  warned.add(key);
+  console.error(message);
 }
 
 /** True for the wasm's "this variant is newer than I am" BCS error, and nothing else. */
