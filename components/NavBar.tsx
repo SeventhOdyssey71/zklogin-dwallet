@@ -27,9 +27,11 @@ export type NavTab = 'create' | 'all' | 'history' | 'sui';
 
 const TABS: { key: NavTab; label: string }[] = [
   { key: 'create', label: 'Create' },
-  { key: 'all', label: 'All chains' },
+  // The chain list is now the dashboard: it carries the portfolio total, every chain with send/receive,
+  // and recent activity. Keeping the 'all' key means existing #all links still resolve.
+  { key: 'all', label: 'Dashboard' },
   { key: 'history', label: 'History' },
-  { key: 'sui', label: 'My Sui Wallet' },
+  { key: 'sui', label: 'Sui wallet' },
 ];
 
 function BalancePill({

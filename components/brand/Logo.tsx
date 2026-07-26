@@ -32,7 +32,7 @@ function hasSizeClass(className: string): boolean {
   return /(?:^|\s)(?:w-|h-|size-)/.test(className);
 }
 
-/** True when the caller has specified a font size (not merely a text *colour* such as `text-[var(…)]`). */
+/** True when the caller has specified a font size (not merely a text *colour* such as `an arbitrary text-colour utility`). */
 function hasTextSizeClass(className: string): boolean {
   return /(?:^|\s)text-(?:xs|sm|base|lg|\d*xl|\[\d)/.test(className);
 }
