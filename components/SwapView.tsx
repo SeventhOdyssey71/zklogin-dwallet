@@ -42,6 +42,15 @@ import { warmSendPath } from '@/lib/ika/warmSendPath';
 import { peek as peekBalance, subscribe as subscribeBalances } from '@/lib/balances/store';
 import { txUrl } from '@/lib/config/chainRegistry';
 import {
+  SUI_COIN_TYPE,
+  buildSuiSendTransaction,
+  fetchSuiWalletAssets,
+  formatUnits,
+  maxSendable,
+  toBaseUnits,
+  type SuiAsset,
+} from '@/lib/sui/sendSui';
+import {
   findAsset,
   quote,
   notifyDeposit,
@@ -69,6 +78,63 @@ const POLL_TIMEOUT_MS = 10 * 60 * 1000;
 const MINIMUM_PROBE_LAMPORTS = 1_000_000;
 
 const PHASES = ['Amount', 'Review', 'Settling', 'Done'] as const;
+
+export type Direction = 'solToSui' | 'suiToSol';
+
+/**
+ * What differs between the two directions — and, more importantly, what does not.
+ *
+ * Both are the same intent: send the origin asset to an address the service reserves, and let solvers
+ * deliver the destination asset. Only the deposit leg differs, and it differs a lot:
+ *
+ *   SOL → SUI  the deposit is a Solana transfer, so it needs a dWallet signature — presignature, key
+ *              share, wasm sign request, MPC round. Measured at 28.2s before the transfer even goes out.
+ *   SUI → SOL  the deposit is a Sui transfer from the zkLogin wallet itself, signed with the ephemeral
+ *              key. No dWallet, no MPC, no wasm. It is the same code path as the wallet's own withdraw
+ *              form, which is why this direction is the fastest thing in the app.
+ *
+ * Keeping that asymmetry in one table rather than in branches through the flow is what stops the two
+ * directions drifting into two implementations.
+ */
+const ROUTES: Record<
+  Direction,
+  {
+    /** (blockchain, symbol) as the intents service lists them. */
+    origin: [string, string];
+    destination: [string, string];
+    fromChain: string;
+    toChain: string;
+    fromSymbol: string;
+    toSymbol: string;
+    /** What signs the deposit, in the user's words. */
+    signerLabel: string;
+    fromLabel: string;
+    toLabel: string;
+  }
+> = {
+  solToSui: {
+    origin: ['sol', 'SOL'],
+    destination: ['sui', 'SUI'],
+    fromChain: 'Solana',
+    toChain: 'Sui',
+    fromSymbol: 'SOL',
+    toSymbol: 'SUI',
+    signerLabel: 'Your dWallet signs the SOL transfer',
+    fromLabel: 'your Solana dWallet',
+    toLabel: 'your Sui wallet',
+  },
+  suiToSol: {
+    origin: ['sui', 'SUI'],
+    destination: ['sol', 'SOL'],
+    fromChain: 'Sui',
+    toChain: 'Solana',
+    fromSymbol: 'SUI',
+    toSymbol: 'SOL',
+    signerLabel: 'Your Sui wallet signs the transfer',
+    fromLabel: 'your Sui wallet',
+    toLabel: 'your Solana dWallet',
+  },
+};
 
 /**
  * Trim a token amount to something readable.
@@ -99,9 +165,10 @@ const PHASE_INDEX: Record<Phase, number> = {
 /** The settling timeline, in order. Each entry lights up as the swap reaches it. */
 const TIMELINE: { key: Phase | 'credited'; label: string; detail: string }[] = [
   { key: 'committing', label: 'Reserving', detail: 'Locking the rate and getting a deposit address' },
-  { key: 'signing', label: 'Signing', detail: 'Your dWallet signs the SOL transfer' },
+  // `detail` for this step is supplied per direction — a Sui deposit involves no dWallet at all.
+  { key: 'signing', label: 'Signing', detail: '' },
   { key: 'watching', label: 'Filling', detail: 'Solvers are filling the order' },
-  { key: 'credited', label: 'Credited', detail: 'Native SUI lands in your wallet' },
+  { key: 'credited', label: 'Credited', detail: '' },
 ];
 
 const TIMELINE_ORDER: string[] = TIMELINE.map((t) => t.key);
@@ -129,12 +196,61 @@ export const SwapView = memo(function SwapView({
    * as a prop would re-render the whole shell, and this view would then re-render while someone is typing
    * an amount into it.
    */
-  const balance = useSyncExternalStore(
+  const [direction, setDirection] = useState<Direction>('solToSui');
+  const route = ROUTES[direction];
+  const sendingSol = direction === 'solToSui';
+
+  /** Source and destination follow the direction; the refund always goes back to the source. */
+  const fromAddress = sendingSol ? solanaAddress : suiAddress;
+  const toAddress = sendingSol ? suiAddress : solanaAddress;
+
+  /**
+   * The live SOL balance, read from the shared balance store.
+   *
+   * Taken from the store rather than passed down because it changes on every 30-second poll — threading it
+   * as a prop would re-render the whole shell, and this view would then re-render while someone is typing
+   * an amount into it.
+   */
+  const solBalance = useSyncExternalStore(
     subscribeBalances,
     () => String(peekBalance('Solana', solanaAddress)?.balance ?? ''),
     () => ''
   );
-  const available = balance === '' ? null : parseFloat(balance) || 0;
+
+  /**
+   * The SUI side is read directly rather than from the balance store.
+   *
+   * The store tracks dWallet chains; the zkLogin Sui account is not one of them. More importantly, SUI
+   * pays its own gas, so the number that matters is not the balance but `maxSendable` — the balance minus
+   * the gas reserve. Reusing the wallet's own helper means the swap and the withdraw form can never
+   * disagree about what is spendable.
+   */
+  const [suiAsset, setSuiAsset] = useState<SuiAsset | null>(null);
+  /** Bumped after a swap settles, so the spendable balance reflects what just left. */
+  const [balanceNonce, setBalanceNonce] = useState(0);
+  useEffect(() => {
+    if (sendingSol) return;
+    let live = true;
+    void fetchSuiWalletAssets(suiClient, suiAddress)
+      .then((assets) => {
+        const sui = assets.find((a) => a.type === SUI_COIN_TYPE) ?? null;
+        if (live) setSuiAsset(sui);
+      })
+      .catch(() => {
+        /* leaves the balance unknown, which only hides the Max button */
+      });
+    return () => {
+      live = false;
+    };
+  }, [sendingSol, suiClient, suiAddress, balanceNonce]);
+
+  const available = sendingSol
+    ? solBalance === ''
+      ? null
+      : parseFloat(solBalance) || 0
+    : suiAsset
+      ? Number(formatUnits(maxSendable(suiAsset), suiAsset.decimals))
+      : null;
 
   const [amount, setAmount] = useState('');
   const [phase, setPhase] = useState<Phase>('amount');
@@ -161,11 +277,14 @@ export const SwapView = memo(function SwapView({
    */
   const warmed = useRef(false);
   useEffect(() => {
+    // Only the Solana leg needs any of this. A Sui deposit is signed with the ephemeral key already in
+    // memory — there is no presignature to bank and no key share to decrypt.
+    if (!sendingSol) return;
     if (phase !== 'amount' && phase !== 'review') return;
     if (phase === 'amount' && warmed.current) return;
     warmed.current = true;
     void warmSendPath({ suiClient, zkAddress: suiAddress, dwalletId, chain: 'Solana' });
-  }, [phase, suiClient, suiAddress, dwalletId]);
+  }, [sendingSol, phase, suiClient, suiAddress, dwalletId]);
 
   const requested = parseFloat(amount) || 0;
   const overBalance = available !== null && requested > available;
@@ -186,14 +305,17 @@ export const SwapView = memo(function SwapView({
     let live = true;
     (async () => {
       try {
-        const [sol, sui] = await Promise.all([findAsset('sol', 'SOL'), findAsset('sui', 'SUI')]);
-        if (!sol || !sui) return;
+        const [from, to] = await Promise.all([
+          findAsset(...route.origin),
+          findAsset(...route.destination),
+        ]);
+        if (!from || !to) return;
         await quote({
-          originAsset: sol.assetId,
-          destinationAsset: sui.assetId,
+          originAsset: from.assetId,
+          destinationAsset: to.assetId,
           amount: String(MINIMUM_PROBE_LAMPORTS),
-          refundTo: solanaAddress,
-          recipient: suiAddress,
+          refundTo: fromAddress,
+          recipient: toAddress,
           slippageBps: SLIPPAGE_BPS,
           dry: true,
         });
@@ -207,7 +329,8 @@ export const SwapView = memo(function SwapView({
     return () => {
       live = false;
     };
-  }, [solanaAddress, suiAddress]);
+    // Re-probed per direction: the two routes have different floors.
+  }, [route, fromAddress, toAddress]);
 
   /**
    * Price the route as the user types, without reserving anything.
@@ -241,14 +364,21 @@ export const SwapView = memo(function SwapView({
         return;
       }
       try {
-        const [sol, sui] = await Promise.all([findAsset('sol', 'SOL'), findAsset('sui', 'SUI')]);
-        if (!sol || !sui) throw new Error('The intents service does not currently list SOL → SUI.');
+        const [from, to] = await Promise.all([
+          findAsset(...route.origin),
+          findAsset(...route.destination),
+        ]);
+        if (!from || !to) {
+          throw new Error(
+            `The intents service does not currently list ${route.fromSymbol} → ${route.toSymbol}.`
+          );
+        }
         const q = await quote({
-          originAsset: sol.assetId,
-          destinationAsset: sui.assetId,
-          amount: String(Math.floor(requested * 10 ** sol.decimals)),
-          refundTo: solanaAddress,
-          recipient: suiAddress,
+          originAsset: from.assetId,
+          destinationAsset: to.assetId,
+          amount: String(Math.floor(requested * 10 ** from.decimals)),
+          refundTo: fromAddress,
+          recipient: toAddress,
           slippageBps: SLIPPAGE_BPS,
           dry: true,
         });
@@ -272,7 +402,7 @@ export const SwapView = memo(function SwapView({
       live = false;
       clearTimeout(timer);
     };
-  }, [phase, requested, overBalance, minimum, solanaAddress, suiAddress]);
+  }, [phase, requested, overBalance, minimum, route, fromAddress, toAddress]);
 
   const watch = useCallback(
     async (depositAddress: string) => {
@@ -323,15 +453,22 @@ export const SwapView = memo(function SwapView({
     setPhase('committing');
     setStatusLine('Locking the rate…');
     try {
-      const [sol, sui] = await Promise.all([findAsset('sol', 'SOL'), findAsset('sui', 'SUI')]);
-      if (!sol || !sui) throw new Error('The intents service does not currently list SOL → SUI.');
+      const [from, to] = await Promise.all([
+        findAsset(...route.origin),
+        findAsset(...route.destination),
+      ]);
+      if (!from || !to) {
+        throw new Error(
+          `The intents service does not currently list ${route.fromSymbol} → ${route.toSymbol}.`
+        );
+      }
 
       const live = await quote({
-        originAsset: sol.assetId,
-        destinationAsset: sui.assetId,
-        amount: String(Math.floor(requested * 10 ** sol.decimals)),
-        refundTo: solanaAddress,
-        recipient: suiAddress,
+        originAsset: from.assetId,
+        destinationAsset: to.assetId,
+        amount: String(Math.floor(requested * 10 ** from.decimals)),
+        refundTo: fromAddress,
+        recipient: toAddress,
         slippageBps: SLIPPAGE_BPS,
         dry: false,
       });
@@ -341,30 +478,58 @@ export const SwapView = memo(function SwapView({
       setCommitted(live);
 
       setPhase('signing');
-      setStatusLine('Signing the transfer with your dWallet…');
+      setStatusLine('Signing the transfer…');
 
-      // An ordinary SOL transfer. Same pipeline as any other send.
-      const { signWithDWallet, broadcastTransaction } = await import(
-        '@/lib/dwallet/clientSideSigning'
-      );
-      const signed = await signWithDWallet({
-        dwalletId,
-        dwalletCapId,
-        encryptedShareId: '',
-        chain: 'Solana',
-        recipient: live.depositAddress,
-        // The exact committed amount — an underpayment is refunded rather than filled.
-        amount: String(Number(live.amountInFormatted ?? amount)),
-        suiClient,
-        userAccount: { address: suiAddress },
-        signAndExecuteTransaction: (p: { transaction: unknown }) =>
-          zkLoginSignAndExecute(suiClient, suiAddress, p as never),
-        onProgress: setStatusLine,
-      });
+      /**
+       * The exact committed amount — an underpayment is refunded rather than filled.
+       */
+      const depositAmount = String(Number(live.amountInFormatted ?? amount));
+      let hash: string;
 
-      const hash = signed.serialized
-        ? (await broadcastTransaction('Solana', signed.serialized)).txHash
-        : signed.txHash || signed.hash;
+      if (sendingSol) {
+        /**
+         * A Solana deposit is an ordinary SOL transfer, so this is the same pipeline as any other send:
+         * presignature pool, pre-decrypted key share, durable nonce. No signing code is specific to swaps.
+         */
+        const { signWithDWallet, broadcastTransaction } = await import(
+          '@/lib/dwallet/clientSideSigning'
+        );
+        const signed = await signWithDWallet({
+          dwalletId,
+          dwalletCapId,
+          encryptedShareId: '',
+          chain: 'Solana',
+          recipient: live.depositAddress,
+          amount: depositAmount,
+          suiClient,
+          userAccount: { address: suiAddress },
+          signAndExecuteTransaction: (p: { transaction: unknown }) =>
+            zkLoginSignAndExecute(suiClient, suiAddress, p as never),
+          onProgress: setStatusLine,
+        });
+        hash = signed.serialized
+          ? (await broadcastTransaction('Solana', signed.serialized)).txHash
+          : signed.txHash || signed.hash;
+      } else {
+        /**
+         * A Sui deposit needs no dWallet at all.
+         *
+         * The money is already in the zkLogin account, so the transfer is signed with the ephemeral key
+         * directly — the same path as the wallet's withdraw form. That skips the presignature, the key
+         * share, the wasm sign request and the MPC round, which together were 28.2s of the measured
+         * SOL → SUI swap. This direction is a single Sui transaction.
+         */
+        if (!suiAsset) throw new Error('Still reading your SUI balance — try again in a moment.');
+        const tx = buildSuiSendTransaction({
+          asset: suiAsset,
+          amountBaseUnits: toBaseUnits(depositAmount, suiAsset.decimals),
+          recipient: live.depositAddress,
+          sender: suiAddress,
+        });
+        const { digest } = await zkLoginSignAndExecute(suiClient, suiAddress, { transaction: tx });
+        hash = digest;
+      }
+
       setDepositTx(hash);
 
       // Optional, and free: it only speeds up detection.
@@ -383,6 +548,22 @@ export const SwapView = memo(function SwapView({
     }
   };
 
+  /**
+   * Change direction, discarding everything the old one implied.
+   *
+   * The quote, the learned minimum and any priced preview all belong to one asset pair. Keeping the
+   * typed amount would be worse than useless — 0.05 is a sensible amount of SOL and a dust amount of
+   * SUI — so the form starts clean.
+   */
+  const switchDirection = (next: Direction) => {
+    if (next === direction) return;
+    setDirection(next);
+    setAmount('');
+    setPreview(null);
+    setMinimum(null);
+    setError(null);
+  };
+
   const reset = () => {
     setPhase('amount');
     setPreview(null);
@@ -394,6 +575,7 @@ export const SwapView = memo(function SwapView({
     setAmount('');
     setError(null);
     setStartedAt(null);
+    setBalanceNonce((n) => n + 1);
   };
 
   const settling = phase === 'committing' || phase === 'signing' || phase === 'watching';
@@ -401,9 +583,41 @@ export const SwapView = memo(function SwapView({
 
   return (
     <div className="space-y-5">
-      <div>
-        <h1 className="text-2xl font-bold">Swap to Sui</h1>
-        <p className="mono-label mt-1">SOLANA → SUI · VIA NEAR INTENTS</p>
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <h1 className="text-2xl font-bold">Swap</h1>
+          <p className="mono-label mt-1">
+            {route.fromChain} → {route.toChain} · VIA NEAR INTENTS
+          </p>
+        </div>
+
+        {/*
+          Direction is a choice, not a setting, so it sits next to the title rather than in the form.
+          Disabled once anything is in flight: the quote, the deposit address and the signature all
+          belong to one direction, and switching mid-flow would silently invalidate all three.
+        */}
+        <div
+          role="group"
+          aria-label="Swap direction"
+          className="flex rounded-[var(--radius-sm)] border border-[var(--border)] overflow-hidden shrink-0"
+        >
+          {(['solToSui', 'suiToSol'] as Direction[]).map((d) => (
+            <button
+              key={d}
+              type="button"
+              onClick={() => switchDirection(d)}
+              disabled={phase !== 'amount'}
+              aria-pressed={direction === d}
+              className={`px-3 py-1.5 mono-label transition disabled:opacity-40 disabled:cursor-not-allowed ${
+                direction === d
+                  ? 'bg-[var(--foreground)] text-black'
+                  : 'hover:text-[var(--foreground)] cursor-pointer'
+              }`}
+            >
+              {ROUTES[d].fromSymbol} → {ROUTES[d].toSymbol}
+            </button>
+          ))}
+        </div>
       </div>
 
       <Stepper phases={PHASES} current={PHASE_INDEX[phase]} label="Swap progress" />
@@ -412,13 +626,17 @@ export const SwapView = memo(function SwapView({
       <div className="card p-4">
         <div className="flex items-center justify-between gap-3">
           <div className="min-w-0">
-            <p className="mono-label">From · your Solana dWallet</p>
-            <p className="text-sm num truncate mt-0.5">{truncate(solanaAddress, 8, 6)}</p>
+            <p className="mono-label">From · {route.fromLabel}</p>
+            <p className="text-sm num truncate mt-0.5">{truncate(fromAddress, 8, 6)}</p>
           </div>
           <div className="text-right shrink-0">
             <p className="mono-label">Available</p>
             <p className="text-sm num mt-0.5">
-              {available === null ? <Skeleton className="h-3 w-16" /> : `${available} SOL`}
+              {available === null ? (
+                <Skeleton className="h-3 w-16" />
+              ) : (
+                `${fmtAmount(available)} ${route.fromSymbol}`
+              )}
             </p>
           </div>
         </div>
@@ -429,10 +647,10 @@ export const SwapView = memo(function SwapView({
         </div>
         <div className="flex items-center justify-between gap-3">
           <div className="min-w-0">
-            <p className="mono-label">To · your Sui wallet</p>
-            <p className="text-sm num truncate mt-0.5">{truncate(suiAddress, 8, 6)}</p>
+            <p className="mono-label">To · {route.toLabel}</p>
+            <p className="text-sm num truncate mt-0.5">{truncate(toAddress, 8, 6)}</p>
           </div>
-          <p className="mono-label shrink-0">native SUI</p>
+          <p className="mono-label shrink-0">native {route.toSymbol}</p>
         </div>
       </div>
 
@@ -469,7 +687,7 @@ export const SwapView = memo(function SwapView({
               }`}
             />
             <span className="absolute right-3 top-1/2 -translate-y-1/2 mono-label pointer-events-none">
-              SOL
+              {route.fromSymbol}
             </span>
           </div>
 
@@ -479,13 +697,17 @@ export const SwapView = memo(function SwapView({
           {/* Rounded UP: showing a truncated minimum would name an amount that still gets rejected. */}
           {belowMinimum && (
             <p className="text-xs text-[var(--danger)]">
-              Below the service minimum of {Math.ceil(minimum! * 1e6) / 1e6} SOL.
+              Below the service minimum of {Math.ceil(minimum! * 1e6) / 1e6} {route.fromSymbol}.
             </p>
           )}
 
           {preview && (
             <div className="rounded-[var(--radius-sm)] bg-[var(--surface-2)] p-3 space-y-1.5">
-              <Row label="You receive" value={`≈ ${fmtAmount(preview.amountOutFormatted)} SUI`} strong />
+              <Row
+                label="You receive"
+                value={`≈ ${fmtAmount(preview.amountOutFormatted)} ${route.toSymbol}`}
+                strong
+              />
               <Row label="Estimated time" value={`~${preview.timeEstimate ?? 35}s`} />
             </div>
           )}
@@ -506,20 +728,24 @@ export const SwapView = memo(function SwapView({
         <div className="card p-4 space-y-3">
           <h2 className="font-bold text-sm">Review</h2>
           <div className="rounded-[var(--radius-sm)] bg-[var(--surface-2)] p-3 space-y-1.5">
-            <Row label="You send" value={`${fmtAmount(requested)} SOL`} strong />
-            <Row label="You receive" value={`≈ ${fmtAmount(preview?.amountOutFormatted)} SUI`} strong />
+            <Row label="You send" value={`${fmtAmount(requested)} ${route.fromSymbol}`} strong />
+            <Row
+              label="You receive"
+              value={`≈ ${fmtAmount(preview?.amountOutFormatted)} ${route.toSymbol}`}
+              strong
+            />
             <Row
               label="Guaranteed minimum"
               value={
                 preview?.minAmountOut
-                  ? `${fmtAmount(Number(preview.minAmountOut) / 1e9)} SUI`
+                  ? `${fmtAmount(Number(preview.minAmountOut) / 1e9)} ${route.toSymbol}`
                   : '—'
               }
             />
             <Row label="Max slippage" value={`${SLIPPAGE_BPS / 100}%`} />
             <Row label="Estimated time" value={`~${preview?.timeEstimate ?? 35}s`} />
             {/* Named, not implied: this is the promise that makes the risk above acceptable. */}
-            <Row label="Refunds to" value={truncate(solanaAddress, 6, 6)} />
+            <Row label="Refunds to" value={truncate(fromAddress, 6, 6)} />
           </div>
 
           {/*
@@ -528,10 +754,10 @@ export const SwapView = memo(function SwapView({
             entitled to see it before agreeing, not after.
           */}
           <p className="text-[11px] text-[var(--muted)] leading-relaxed">
-            The rate is locked when you confirm. Your SOL goes to a deposit address the service reserves for
-            this swap, and solvers fill it — so between sending and being credited, they hold the funds. If
-            no one fills it, your SOL is refunded automatically to the account it came from. Native SUI, no
-            wrapped assets.
+            The rate is locked when you confirm. Your {route.fromSymbol} goes to a deposit address the
+            service reserves for this swap, and solvers fill it — so between sending and being credited,
+            they hold the funds. If no one fills it, your {route.fromSymbol} is refunded automatically to
+            the account it came from. Native {route.toSymbol}, no wrapped assets.
           </p>
 
           {error && <ErrorNote {...error} />}
@@ -581,7 +807,11 @@ export const SwapView = memo(function SwapView({
                     </span>
                     {active && (
                       <span className="text-[11px] text-[var(--muted)] block mt-0.5">
-                        {statusLine || step.detail}
+                        {statusLine ||
+                          step.detail ||
+                          (step.key === 'signing'
+                            ? route.signerLabel
+                            : `Native ${route.toSymbol} lands in ${route.toLabel}`)}
                       </span>
                     )}
                   </span>
@@ -594,7 +824,7 @@ export const SwapView = memo(function SwapView({
             <CopyField
               label="Deposit transaction"
               value={depositTx}
-              href={txUrl('Solana', depositTx) ?? undefined}
+              href={txUrl(route.fromChain, depositTx) ?? undefined}
             />
           )}
           {phase === 'watching' && (
@@ -610,7 +840,7 @@ export const SwapView = memo(function SwapView({
               )}
               <p className="text-[11px] text-[var(--muted)] leading-relaxed">
                 Leaving this page does not cancel the swap — it settles on its own, and an unfilled order
-                refunds to your Solana wallet without any further signature from you.
+                refunds to {route.fromLabel} without any further signature from you.
               </p>
             </>
           )}
@@ -621,20 +851,23 @@ export const SwapView = memo(function SwapView({
         <div className="card p-4 space-y-3">
           {status === 'SUCCESS' && (
             <>
-              <p className="text-sm text-[var(--success)]">SUI has landed in your Sui wallet.</p>
+              <p className="text-sm text-[var(--success)]">
+                {route.toSymbol} has landed in {route.toLabel}.
+              </p>
               {creditTx && (
                 <CopyField
-                  label="Sui transaction"
+                  label={`${route.toChain} transaction`}
                   value={creditTx}
-                  href={txUrl('Sui', creditTx) ?? undefined}
+                  href={txUrl(route.toChain, creditTx) ?? undefined}
                 />
               )}
             </>
           )}
           {status === 'REFUNDED' && (
             <p className="text-sm text-[var(--warning)]">
-              No solver filled the order, so your SOL was refunded to {truncate(solanaAddress, 6, 6)} — the
-              account it came from. Nothing was lost beyond the network fee.
+              No solver filled the order, so your {route.fromSymbol} was refunded to{' '}
+              {truncate(fromAddress, 6, 6)} — the account it came from. Nothing was lost beyond the
+              network fee.
             </p>
           )}
           {status === 'FAILED' && (
@@ -651,7 +884,7 @@ export const SwapView = memo(function SwapView({
             <CopyField
               label="Deposit transaction"
               value={depositTx}
-              href={txUrl('Solana', depositTx) ?? undefined}
+              href={txUrl(route.fromChain, depositTx) ?? undefined}
             />
           )}
           <Button variant="secondary" onClick={reset} className="w-full">

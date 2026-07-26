@@ -264,7 +264,8 @@ export function AppShell({ initiallySignedIn }: { initiallySignedIn: boolean }) 
                   <div className="card p-6 text-center space-y-2">
                     <p className="text-sm">No Solana wallet yet.</p>
                     <p className="text-xs text-[var(--muted)]">
-                      Swapping to Sui sends SOL from your Solana dWallet, so create your wallets first.
+                      Swapping moves value between your Solana dWallet and your Sui wallet, so create
+                      your wallets first.
                     </p>
                     <Button variant="secondary" size="sm" onClick={() => setTab('create')}>
                       Create my wallets
