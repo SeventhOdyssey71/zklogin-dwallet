@@ -27,7 +27,6 @@ import { Reveal, Section, SectionHeader, STAGGER_CHILD, STAGGER_PARENT } from '.
 const KEY_GROUPS: { curve: CurveKind; scheme: string; covers: string }[] = [
   { curve: 'ECDSA', scheme: 'secp256k1', covers: 'Bitcoin and every EVM chain' },
   { curve: 'EdDSA', scheme: 'ed25519', covers: 'Solana, NEAR and Cardano' },
-  { curve: 'Schnorrkel', scheme: 'sr25519', covers: "Polkadot, on Substrate's native scheme" },
 ];
 
 function ChainTile({ chain, asset }: { chain: ChainDef; asset?: ChainAsset }) {

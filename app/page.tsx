@@ -96,7 +96,6 @@ const CHAIN_ORDER = [
   'Solana',
   'NEAR',
   'Cardano',
-  'Polkadot',
 ];
 
 const TAB_KEYS: NavTab[] = ['create', 'all', 'history', 'sui'];
@@ -368,15 +367,15 @@ function AllChainsView({
       const wallets = await listDWallets(suiClient, account.address);
       const ecdsa = wallets.find((w) => w.curve === 'ECDSA' && w.state === 'Active');
       const eddsa = wallets.find((w) => w.curve === 'EdDSA' && w.state === 'Active');
-      const schnorrkel = wallets.find((w) => w.curve === 'Schnorrkel' && w.state === 'Active');
 
       const markets = await fetchTokenMarkets();
       const addrMap: Record<string, string> = {};
       const srcMap: Record<string, { id: string; capId: string }> = {};
       const nextTargets: BalanceTarget[] = [];
 
-      // All three curves — omitting Schnorrkel here silently dropped Polkadot's native address.
-      for (const w of [ecdsa, eddsa, schnorrkel]) {
+      // Both live curves. Schnorrkel is still read below so an account that already holds one is not
+      // treated as broken, but it contributes no chains now that Polkadot is gone.
+      for (const w of [ecdsa, eddsa]) {
         if (!w) continue;
         const { addresses, curveNumber } = await getDWalletAddresses(suiClient, w.id);
         Object.assign(addrMap, addresses);

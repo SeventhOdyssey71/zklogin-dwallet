@@ -59,11 +59,6 @@ export const SOLANA_MAINNET = {
   blockExplorer: 'https://explorer.solana.com',
 };
 
-export const POLKADOT_MAINNET = {
-  name: 'Polkadot Asset Hub',
-  rpcUrl: process.env.NEXT_PUBLIC_POLKADOT_RPC_URL || 'wss://polkadot-asset-hub-rpc.polkadot.io',
-  blockExplorer: 'https://assethub-polkadot.subscan.io',
-};
 
 /**
  * Cardano goes through Koios (not Blockfrost) — it needs no API key, which is why the app's
@@ -87,8 +82,6 @@ export const NEAR_MAINNET = {
 // Deprecated aliases, same rationale as TESTNET_CHAINS above.
 /** @deprecated Use SOLANA_MAINNET. */
 export const SOLANA_TESTNET = SOLANA_MAINNET;
-/** @deprecated Use POLKADOT_MAINNET. */
-export const POLKADOT_TESTNET = POLKADOT_MAINNET;
 /** @deprecated Use CARDANO_MAINNET. */
 export const CARDANO_TESTNET = CARDANO_MAINNET;
 /** @deprecated Use NEAR_MAINNET. */
@@ -101,8 +94,6 @@ export function txExplorerUrl(chain: string, txHash: string): string {
       return `${MAINNET_CHAINS.Bitcoin.blockExplorer}/tx/${txHash}`;
     case 'Solana':
       return `${SOLANA_MAINNET.blockExplorer}/tx/${txHash}`;
-    case 'Polkadot':
-      return `${POLKADOT_MAINNET.blockExplorer}/extrinsic/${txHash}`;
     case 'Cardano':
       return `${CARDANO_MAINNET.blockExplorer}/transaction/${txHash}`;
     case 'NEAR':

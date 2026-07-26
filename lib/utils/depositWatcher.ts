@@ -16,7 +16,7 @@
  *            tightest correct trigger; this is event-driven rather than a fixed timer.
  *   Bitcoin  mempool.space `track-address` if the socket connects (it is origin-checked and may
  *            refuse outside a browser), otherwise polling.
- *   Others   Polkadot / Cardano / NEAR have no free realtime endpoint wired up, so they poll.
+ *   Others   Cardano / NEAR have no free realtime endpoint wired up, so they poll.
  *
  * Everything degrades to polling rather than failing: a watcher that silently stops is worse than
  * a slower one. Reconnects use capped exponential backoff so a flaky network doesn't spin.

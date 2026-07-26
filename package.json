@@ -21,7 +21,6 @@
     "@mysten/sui": "2.22.1",
     "@noble/curves": "~2.2.0",
     "@noble/hashes": "~2.2.0",
-    "@polkadot/api": "^16.5.4",
     "@scure/btc-signer": "2.2.0",
     "@solana/web3.js": "^1.98.4",
     "@tanstack/react-query": "^5.90.12",
@@ -52,5 +51,5 @@
     "tailwindcss": "^4",
     "typescript": "^5"
   },
-  "description": "ycos \u2014 your chain on sui. zkLogin multi-chain wallet secured by Ika 2PC-MPC."
+  "description": "ycos — your chain on sui. zkLogin multi-chain wallet secured by Ika 2PC-MPC."
 }

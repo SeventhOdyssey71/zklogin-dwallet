@@ -13,7 +13,6 @@ import { CHAIN_BY_ID, CHAINS } from '../../config/chainRegistry';
 import { getEthereumSigner } from './ethereum';
 import { getSolanaSigner } from './solana';
 import { getBitcoinSigner } from './bitcoin';
-import { getPolkadotSigner } from './polkadot';
 import { getCardanoSigner } from './cardano';
 import { getNearSigner } from './near';
 
@@ -21,7 +20,6 @@ import { getNearSigner } from './near';
 const NON_EVM_SIGNERS: Record<string, () => ChainSigner> = {
   Solana: getSolanaSigner,
   Bitcoin: getBitcoinSigner,
-  Polkadot: getPolkadotSigner,
   Cardano: getCardanoSigner,
   NEAR: getNearSigner,
 };

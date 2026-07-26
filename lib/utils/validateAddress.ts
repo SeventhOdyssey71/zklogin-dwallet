@@ -93,46 +93,6 @@ async function checkBitcoin(address: string): Promise<AddressCheck> {
   }
 }
 
-/**
- * Polkadot: SS58, verified through its own blake2b checksum.
- *
- * Done with `blakejs` + `bs58` — the same primitives `deriveAddresses.ts` uses to *produce* these
- * addresses — rather than `@polkadot/util-crypto`. That package is not a direct dependency (it only
- * arrives transitively under `@polkadot/api`, so pnpm does not expose it at the project root) and
- * importing it would resolve during development yet fail in a production build.
- */
-async function checkPolkadot(address: string): Promise<AddressCheck> {
-  if (looksLikeEvm(address)) return bad('That is an EVM address — this is a Polkadot send.');
-
-  const [{ default: bs58 }, blake] = await Promise.all([import('bs58'), import('blakejs')]);
-
-  let raw: Uint8Array;
-  try {
-    raw = bs58.decode(address);
-  } catch {
-    return bad('Not a valid SS58 address (it is not base58).');
-  }
-
-  // A network prefix is one byte below 64, otherwise two. Polkadot itself is 0.
-  const prefixLen = raw[0] < 64 ? 1 : 2;
-  const body = raw.subarray(0, prefixLen + 32);
-  const checksum = raw.subarray(prefixLen + 32);
-  if (raw.length !== prefixLen + 32 + 2) {
-    return bad('Not a valid SS58 address (wrong length for a 32-byte public key).');
-  }
-
-  // Checksum is the first two bytes of blake2b-512 over "SS58PRE" ++ prefix ++ public key.
-  const preimage = new Uint8Array(7 + body.length);
-  preimage.set(new TextEncoder().encode('SS58PRE'), 0);
-  preimage.set(body, 7);
-  const hash = blake.blake2b(preimage, undefined, 64);
-
-  if (hash[0] !== checksum[0] || hash[1] !== checksum[1]) {
-    return bad('This Polkadot address fails its checksum — a character is likely mistyped.');
-  }
-  return ok;
-}
-
 /** Cardano: bech32 `addr1…` (Shelley). Length varies, so the prefix and checksum are what matter. */
 async function checkCardano(address: string): Promise<AddressCheck> {
   if (address.startsWith('addr_test1')) {
@@ -188,8 +148,6 @@ export async function validateAddress(chain: string, address: string): Promise<A
       return checkSolana(trimmed);
     case 'Bitcoin':
       return checkBitcoin(trimmed);
-    case 'Polkadot':
-      return checkPolkadot(trimmed);
     case 'Cardano':
       return checkCardano(trimmed);
     case 'NEAR':

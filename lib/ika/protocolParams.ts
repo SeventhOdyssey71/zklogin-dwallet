@@ -209,6 +209,57 @@ function curveOf(dWallet: unknown): Curve {
  * `probeCurve` is the curve the caller actually wants: the only way to prove a payload readable is to
  * convert it, so converting for that curve makes the proof and the answer the same piece of work.
  */
+/**
+ * Ask the server which epoch worked last time.
+ *
+ * Cheap and entirely optional: on a hit we read that one dynamic field instead of paging through every
+ * epoch in the table, which is where most of a cold resolve's time goes. A stale or wrong hint costs
+ * nothing — it is verified by actually parsing that epoch, and a failure falls through to the full walk.
+ */
+async function readEpochHint(encryptionKeyId: string): Promise<number | null> {
+  if (typeof window === 'undefined') return null;
+  try {
+    const res = await fetch(
+      `/api/ika/params-epoch?encryptionKeyId=${encodeURIComponent(encryptionKeyId)}`,
+      { cache: 'no-store' }
+    );
+    if (!res.ok) return null;
+    const { epoch } = (await res.json()) as { epoch?: number | null };
+    return typeof epoch === 'number' ? epoch : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Record a working epoch so the next cold start skips the walk. Fire-and-forget. */
+function writeEpochHint(encryptionKeyId: string, epoch: number): void {
+  if (typeof window === 'undefined') return;
+  void fetch('/api/ika/params-epoch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ encryptionKeyId, epoch }),
+  }).catch(() => {
+    // Signed out or offline; the next resolve simply pays the walk again.
+  });
+}
+
+/** Read one epoch's entry directly, without enumerating the table. */
+async function fieldIdForEpoch(
+  suiClient: AppSuiClient,
+  reconfigTableId: string,
+  epoch: number
+): Promise<string | null> {
+  try {
+    const field = await suiClient.getDynamicFieldObject({
+      parentId: reconfigTableId,
+      name: { type: 'u64', value: String(epoch) },
+    });
+    return field.data?.objectId ?? null;
+  } catch {
+    return null;
+  }
+}
+
 async function resolvePayload(
   ikaClient: IkaClient,
   suiClient: AppSuiClient,
@@ -231,6 +282,41 @@ async function resolvePayload(
   }
 
   const dkg = await ikaClient.readTableVecAsRawBytes(dkgTableId);
+
+  /**
+   * Try the cached hint first.
+   *
+   * One `getDynamicFieldObject` instead of paging the whole table. Verified by parsing, so a wrong hint
+   * just falls through to the walk below.
+   */
+  const hinted = await readEpochHint(encryptionKeyId);
+  if (hinted !== null) {
+    /**
+     * The whole attempt is inside one try, including `probe`, which throws when a field cannot be read.
+     * A stale hint must FALL THROUGH to the walk, never escape — otherwise caching an answer would make
+     * the module fail where it previously succeeded, which is the opposite of an optimisation.
+     */
+    try {
+      const fieldId = await fieldIdForEpoch(suiClient, reconfigTableId, hinted);
+      if (fieldId) {
+        const { tableVecId } = await probe(suiClient, fieldId);
+        const reconfig = await ikaClient.readTableVecAsRawBytes(tableVecId);
+        const params = await reconfigurationPublicOutputToProtocolPublicParameters(
+          probeCurve,
+          reconfig,
+          dkg
+        );
+        // Memoised without `params`, matching the walk below: the bytes are shared by every curve, the
+        // 44MB conversion is not.
+        const resolved = { epoch: hinted, reconfig, dkg };
+        payloadCache.set(encryptionKeyId, resolved);
+        return { ...resolved, params };
+      }
+    } catch {
+      // Hint no longer usable — Ika moved on, or it was never right. The walk below finds and records a
+      // fresh one.
+    }
+  }
 
   // Newest epoch first.
   const epochs: { epoch: number; fieldId: string }[] = [];
@@ -277,6 +363,8 @@ async function resolvePayload(
       // Memoised without `params`: the bytes are shared by every curve, the 44MB conversion is not.
       const resolved = { epoch: candidate.epoch, reconfig, dkg };
       payloadCache.set(encryptionKeyId, resolved);
+      // Share the answer so no other client, tab or cold start has to page the whole table again.
+      writeEpochHint(encryptionKeyId, candidate.epoch);
       return { ...resolved, params };
     }
   }

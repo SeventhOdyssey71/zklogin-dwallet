@@ -10,5 +10,11 @@
 /** The three curves a zkLogin account can hold a dWallet on. */
 export type DWalletKind = 'ECDSA' | 'EdDSA' | 'Schnorrkel';
 
-/** Every curve, in the order they are created. */
-export const ALL_KINDS: DWalletKind[] = ['ECDSA', 'EdDSA', 'Schnorrkel'];
+/**
+ * The curves a new account actually needs.
+ *
+ * Schnorrkel is deliberately absent: its only chain was Polkadot, which cannot sign (see the note in
+ * chainRegistry.ts), so creating one spent ~0.07 SUI and IKA on a key with nowhere to send. The KIND
+ * itself stays in `DWalletKind` so accounts that already hold one still list it rather than crashing.
+ */
+export const ALL_KINDS: DWalletKind[] = ['ECDSA', 'EdDSA'];

@@ -138,45 +138,11 @@ async function cardanoBalance(address: string): Promise<Balance> {
   return { balance: fromBaseUnits(BigInt(first.balance ?? '0'), 6), usdValue: 0 };
 }
 
-/* ----------------------------- Polkadot ---------------------------- */
-
-/**
- * Polkadot over its websocket API, with the connection cached.
- *
- * Reconnecting per read is what produced the "1006 Abnormal Closure" and "RPC methods not decorated"
- * noise, plus a multi-second handshake on every refresh.
+/*
+ * Polkadot's reader is gone along with the chain (see chainRegistry.ts). That removes the last import of
+ * `@polkadot/api` from the client, which was 875 KB — the single largest dependency in the bundle — and
+ * with it the websocket connection this module had to keep alive and reconnect.
  */
-let polkadotApi: Promise<{
-  query: { system: { account: (a: string) => Promise<{ data: { free: { toBigInt(): bigint } } }> } };
-}> | null = null;
-
-function getPolkadotApi() {
-  if (polkadotApi) return polkadotApi;
-  polkadotApi = (async () => {
-    const [{ ApiPromise, WsProvider }, { POLKADOT_MAINNET }] = await Promise.all([
-      import('@polkadot/api'),
-      import('@/lib/config/chains'),
-    ]);
-    const provider = new WsProvider(POLKADOT_MAINNET.rpcUrl);
-    const api = await ApiPromise.create({ provider, noInitWarn: true });
-    // If the socket dies, drop the cache so the next read reconnects rather than using a dead handle.
-    api.on('disconnected', () => {
-      polkadotApi = null;
-    });
-    return api as never;
-  })().catch((e) => {
-    polkadotApi = null;
-    throw e;
-  });
-  return polkadotApi;
-}
-
-async function polkadotBalance(address: string): Promise<Balance> {
-  const api = await getPolkadotApi();
-  const { data } = await api.query.system.account(address);
-  const decimals = CHAIN_BY_ID.Polkadot?.decimals ?? 10;
-  return { balance: fromBaseUnits(data.free.toBigInt(), decimals), usdValue: 0 };
-}
 
 /* ------------------------------ router ----------------------------- */
 
@@ -203,7 +169,6 @@ export async function fetchChainBalance(
     if (chain === 'Bitcoin') return bitcoinBalance(address);
     if (def?.family === 'evm') return evmBalance(chain, address);
     if (chain === 'Solana') return solanaBalance(address);
-    if (chain === 'Polkadot') return polkadotBalance(address);
     if (chain === 'Cardano') return cardanoBalance(address);
     if (chain === 'NEAR') return nearBalance(address);
     quiet(`unsupported:${chain}`, `[balances] no reader for ${chain}`);

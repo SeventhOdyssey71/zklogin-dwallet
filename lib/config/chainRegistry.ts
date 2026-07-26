@@ -300,21 +300,19 @@ const ED25519: ChainDef[] = [
  * ed25519 variant stays for anyone whose funds already sit at that address, while `Polkadot` proper
  * now uses the native curve. Both are valid on-chain; they are simply different accounts.
  */
-const SUBSTRATE: ChainDef[] = [
-  {
-    id: 'Polkadot',
-    name: 'Polkadot Asset Hub',
-    curve: 'Schnorrkel',
-    family: 'substrate',
-    symbol: 'DOT',
-    decimals: 10,
-    rpcUrl: env('NEXT_PUBLIC_POLKADOT_RPC_URL', 'wss://polkadot-asset-hub-rpc.polkadot.io'),
-    explorer: 'https://assethub-polkadot.subscan.io',
-    coingeckoPlatformId: 'polkadot',
-    coingeckoCoinId: 'polkadot',
-    capabilities: { receive: true, send: true },
-  },
-];
+/**
+ * Substrate is intentionally empty.
+ *
+ * Polkadot was removed because it could not sign: its Schnorrkel/ristretto share fails
+ * `decryptUserShare` with "Invalid signature", thrown before any protocol parameter is used, because
+ * `generateDeterministicEncryptionSeed` maps RISTRETTO to the string 'ed25519' — a seed-derivation
+ * mismatch of ours. Listing a chain that can receive but never send is worse than not listing it, and
+ * the fix changes derived keys, so it needs its own decision about the existing dWallet.
+ *
+ * Removing it also removes the only ristretto chain, so onboarding no longer pays for a third DKG, and
+ * `@polkadot/api` (875 KB) leaves the client bundle.
+ */
+const SUBSTRATE: ChainDef[] = [];
 
 export const CHAINS: ChainDef[] = [...EVM, ...SECP_OTHER, ...ED25519, ...SUBSTRATE];
 
