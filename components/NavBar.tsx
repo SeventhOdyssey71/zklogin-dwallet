@@ -17,7 +17,8 @@ import { useEffect, useState } from 'react';
 import { useSuiClient } from '@mysten/dapp-kit';
 import { Loader2, Menu, X } from 'lucide-react';
 import { ConnectWallet } from '@/components/ConnectWallet';
-import { IKA_COIN_TYPE } from '@/lib/config/network';
+import { Logo } from '@/components/brand/Logo';
+import { useGasBalances } from '@/lib/sui/useGasBalances';
 
 const SUI_LOGO = 'https://cryptologos.cc/logos/sui-sui-logo.png';
 const IKA_LOGO = 'https://coin-images.coingecko.com/coins/images/67598/large/ika.jpg?1753770879';
@@ -30,48 +31,6 @@ const TABS: { key: NavTab; label: string }[] = [
   { key: 'history', label: 'History' },
   { key: 'sui', label: 'My Sui Wallet' },
 ];
-
-function fmt(raw: string, decimals: number): string {
-  const n = Number(raw) / 10 ** decimals;
-  return n.toLocaleString(undefined, { maximumFractionDigits: 4 });
-}
-
-/** SUI + IKA balances of the signed-in address. */
-function useGasBalances(address: string | undefined) {
-  const suiClient = useSuiClient();
-  const [sui, setSui] = useState<string | null>(null);
-  const [ika, setIka] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [tick, setTick] = useState(0);
-
-  useEffect(() => {
-    if (!address) return;
-    let cancelled = false;
-    void (async () => {
-      try {
-        const [s, i, meta] = await Promise.all([
-          suiClient.getBalance({ owner: address }),
-          suiClient
-            .getBalance({ owner: address, coinType: IKA_COIN_TYPE })
-            .catch(() => ({ totalBalance: '0' })),
-          suiClient.getCoinMetadata({ coinType: IKA_COIN_TYPE }).catch(() => null),
-        ]);
-        if (cancelled) return;
-        setSui(fmt(s.totalBalance, 9));
-        setIka(fmt(i.totalBalance, meta?.decimals ?? 9));
-      } catch (e) {
-        console.error('Failed to load gas balances:', e);
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [suiClient, address, tick]);
-
-  return { sui, ika, loading, refresh: () => setTick((t) => t + 1) };
-}
 
 function BalancePill({
   logo,
@@ -144,11 +103,11 @@ export function NavBar({
     <header className="sticky top-0 z-30 border-b border-[var(--border)]/60 bg-[var(--background)]/85 backdrop-blur-md">
       <div className="max-w-7xl mx-auto w-full px-4 sm:px-6 py-3 flex items-center gap-4">
         <button
-          onClick={() => go('create')}
-          className="font-extrabold tracking-tight text-lg shrink-0 hover:opacity-80 transition"
-          aria-label="dWallet — go to Create"
+          onClick={() => go(address ? 'all' : 'create')}
+          className="shrink-0 hover:opacity-80 transition"
+          aria-label="ycos — go to the dashboard"
         >
-          dWallet
+          <Logo showWordmark className="h-6" />
         </button>
 
         {/* Desktop: everything on one row. */}

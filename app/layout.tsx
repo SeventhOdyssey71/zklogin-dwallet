@@ -11,35 +11,29 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "dWallet — zkLogin multi-chain wallets on Sui",
-  description:
-    "Sign in with Google (zkLogin) and hold Bitcoin, Ethereum, Solana and 11 more chains from one " +
-    "account. Keys are split across the Ika network with 2PC-MPC — no single party ever holds one.",
-  applicationName: "dWallet",
-  icons: {
-    // Inline SVG favicon: no extra request, and it scales cleanly in a tab at any density.
-    icon: [
-      {
-        url:
-          "data:image/svg+xml," +
-          encodeURIComponent(
-            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">' +
-              '<rect width="32" height="32" rx="7" fill="#000"/>' +
-              '<text x="16" y="22" font-family="ui-monospace,monospace" font-size="17" ' +
-              'font-weight="800" fill="#fff" text-anchor="middle">d</text>' +
-              "</svg>"
-          ),
-      },
-    ],
+  // Lowercase everywhere: "ycos" is the mark, not a capitalised word.
+  title: {
+    default: "ycos — your chain on sui",
+    template: "%s · ycos",
   },
+  description:
+    "One Google login, 14 chains, no seed phrase. ycos splits every key across the Ika validator " +
+    "network with 2PC-MPC, so no single party can sign for you. Coordinated on Sui.",
+  applicationName: "ycos",
+  keywords: ["ycos", "sui", "zklogin", "multi-chain wallet", "MPC wallet", "ika", "2PC-MPC"],
+  // No `icons` field: app/icon.tsx generates the favicon, and declaring both would compete.
   openGraph: {
-    title: "dWallet — zkLogin multi-chain wallets on Sui",
+    title: "ycos — your chain on sui",
     description:
-      "One account, 14 chains. Keys split across the Ika network with 2PC-MPC v4.",
-    siteName: "dWallet",
+      "One Google login, 14 chains, no seed phrase. Keys split across a validator network so no single party can sign for you.",
+    siteName: "ycos",
     type: "website",
   },
-  twitter: { card: "summary_large_image", title: "dWallet" },
+  twitter: {
+    card: "summary_large_image",
+    title: "ycos — your chain on sui",
+    description: "One Google login, 14 chains, no seed phrase.",
+  },
   robots: { index: true, follow: true },
 };
 
