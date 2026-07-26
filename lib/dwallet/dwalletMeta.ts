@@ -201,7 +201,24 @@ async function deriveAddress(params: {
     throw new Error(`Unsupported ED25519 chain: ${chain}`);
   }
 
-  throw new Error(`Unsupported curve for address derivation: ${String(curve)}`);
+  /**
+   * Ristretto — Polkadot's native sr25519/Schnorrkel curve.
+   *
+   * This branch was missing, so `getDWalletMeta` threw for the Schnorrkel dWallet. It surfaced only as a
+   * swallowed "pre-decryption skipped" warning, which then pushed the send onto the slower inline path —
+   * so Polkadot appeared to work while quietly losing the optimisation, and would have failed outright
+   * once inline decryption started needing the same parameters. SS58 encodes the 32-byte public key
+   * directly, exactly as for the ed25519 account.
+   */
+  if (publicKey.length !== 32) {
+    throw new Error(`Unexpected ristretto public key length: ${publicKey.length} bytes (expected 32)`);
+  }
+  if (chain === 'Polkadot') {
+    const { derivePolkadotAddress } = await import('../utils/deriveAddresses');
+    return derivePolkadotAddress(publicKeyHex);
+  }
+
+  throw new Error(`Unsupported chain ${chain} for curve ${String(curve)}`);
 }
 
 /**

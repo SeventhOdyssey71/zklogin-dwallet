@@ -26,6 +26,7 @@ import { getChainSigner } from './chains';
 import { getIkaClient, chainCrypto } from '@/lib/ika/ikaClient';
 import { takeReady, pendingPresign, primePresignPool, refillInBackground } from '@/lib/ika/presignPool';
 import { peekUserShare, prepareUserShare } from '@/lib/ika/userShare';
+import { ensureProtocolPublicParameters } from '@/lib/ika/protocolParams';
 import { generateEncryptionKeys } from './core/encryption';
 import { getDWalletMeta } from './dwalletMeta';
 import { Timings } from './core/timings';
@@ -157,6 +158,24 @@ export async function signWithDWallet(
       buildUnsignedTransaction(params.chain, params.recipient, params.amount, m.address, m.publicKeyHex)
     )
   );
+  /**
+   * Protocol public parameters, resolved here rather than left to `requestSign`.
+   *
+   * `requestSign` fetches them itself, and against Ika mainnet that call currently throws — the shipped
+   * wasm cannot read the reconfiguration output format the network adopted at epoch 360. This resolves
+   * them through `ensureProtocolPublicParameters`, whose side effect is priming the client's cache so
+   * the internal call is answered from memory. See lib/ika/protocolParams.ts.
+   *
+   * It has to happen on *every* send, not only where `prepareUserShare` already ran: imported-key and
+   * shared dWallets never decrypt a share, and a page reload starts with an empty cache. It is normally
+   * a cache hit, and where it is not, this is work `requestSign` would otherwise have done serially.
+   */
+  const paramsP = timed(
+    '· protocol params',
+    Promise.all([ikaClientP, dWalletP]).then(([c, dw]) =>
+      ensureProtocolPublicParameters(c, params.suiClient, dw, curve)
+    )
+  );
   const shareP = timed(
     '· user share',
     Promise.all([ikaClientP, metaP]).then(([c, m]) =>
@@ -170,7 +189,7 @@ export async function signWithDWallet(
 
   const [ikaClient, userShareEncryptionKeys, gasBalance, dWallet, meta, built, encShare] =
     await T.step('prologue (all of the above, concurrent)', () =>
-      Promise.all([ikaClientP, keysP, gasP, dWalletP, metaP, unsignedP, shareP])
+      Promise.all([ikaClientP, keysP, gasP, dWalletP, metaP, unsignedP, shareP, paramsP])
     );
 
   /**

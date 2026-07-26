@@ -40,6 +40,7 @@
 import type { Curve } from '@ika.xyz/sdk';
 import type { AppSuiClient } from '@/lib/sui/client';
 import { getIkaClient } from '@/lib/ika/ikaClient';
+import { ensureProtocolPublicParameters } from '@/lib/ika/protocolParams';
 
 export interface DecryptedShare {
   secretShare: Uint8Array;
@@ -91,9 +92,14 @@ export function prepareUserShare(params: {
   const job = (async (): Promise<DecryptedShare> => {
     const ikaClient = await getIkaClient(params.suiClient);
     // Protocol public parameters are large and cached inside the shared IkaClient, so this is cheap
-    // after the first call in a session.
-    const protocolPublicParameters = await ikaClient.getProtocolPublicParameters(
-      params.dWallet as never,
+    // after the first call in a session. Routed through `ensureProtocolPublicParameters` rather than
+    // called directly because the SDK's own path currently throws against mainnet — see
+    // lib/ika/protocolParams.ts. That helper also primes the client's cache, which is what makes the
+    // call `requestSign` performs internally succeed later on.
+    const protocolPublicParameters = await ensureProtocolPublicParameters(
+      ikaClient,
+      params.suiClient,
+      params.dWallet,
       params.curve
     );
 

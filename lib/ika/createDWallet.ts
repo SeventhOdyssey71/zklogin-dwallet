@@ -50,6 +50,7 @@ import { getShareEncryptionKeys } from '@/lib/ika/shareKeys';
 export type { DWalletKind } from './curves';
 export { ALL_KINDS } from './curves';
 import { ALL_KINDS, type DWalletKind } from './curves';
+import { ensureProtocolPublicParameters } from '@/lib/ika/protocolParams';
 
 /**
  * dWallet state polling.
@@ -216,10 +217,19 @@ export async function createBothDWallets(
    */
   const [latestNetworkKey] = await Promise.all([
     ikaClient.getLatestNetworkEncryptionKey(),
+    /**
+     * Routed through `ensureProtocolPublicParameters`, not called directly.
+     *
+     * The direct call throws at epoch 361+ because the shipped wasm cannot read the network's current
+     * reconfiguration format, and the `.catch(() => undefined)` below only *looked* like it tolerated
+     * that: `prepareDKGAsync` then fetches the parameters itself and hits the identical error, so
+     * creation failed outright. The helper resolves them and primes the client's cache, which is what
+     * makes that internal fetch succeed. See lib/ika/protocolParams.ts.
+     */
     ...kinds.map((k) =>
-      ikaClient
-        .getProtocolPublicParameters(undefined, CURVE_FOR[k])
-        .catch(() => undefined) // prepareDKGAsync will fetch it itself if this fails
+      ensureProtocolPublicParameters(ikaClient, suiClient, undefined, CURVE_FOR[k]).catch(
+        () => undefined
+      )
     ),
   ]);
 
