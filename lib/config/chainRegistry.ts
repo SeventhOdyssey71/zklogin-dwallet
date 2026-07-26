@@ -340,7 +340,16 @@ export function coingeckoCoinIds(): string[] {
 
 /** Chains that can originate a CCTP transfer to Sui. */
 export function cctpSourceChains(): ChainDef[] {
-  return CHAINS.filter((c) => c.cctpDomain !== undefined && c.usdc);
+  /**
+   * EVM only, deliberately — this advertises what the pipeline can actually do.
+   *
+   * Solana has a real CCTP V1 domain (5) and it is recorded above, but the burn leg in lib/pipeline/cctp.ts
+   * is EVM calldata: `approve` + `depositForBurn` encoded through an ethers Interface. Solana's CCTP is an
+   * Anchor program with an entirely different call shape, so it is not implemented. Listing Solana here
+   * would let a UI offer a route that `cctpSourceFor` then refuses — the failure is safe, but the offer is
+   * a lie. Drop this filter only when a Solana burn actually exists.
+   */
+  return CHAINS.filter((c) => c.cctpDomain !== undefined && c.usdc && c.family === 'evm');
 }
 
 /** Explorer URL for a transaction. */
