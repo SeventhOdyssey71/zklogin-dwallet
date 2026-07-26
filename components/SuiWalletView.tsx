@@ -15,10 +15,9 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useSuiClient } from '@mysten/dapp-kit';
 import { toast } from 'sonner';
-import { Check } from 'lucide-react';
+import { ArrowRight, Check } from 'lucide-react';
 import { Button, CopyField, ErrorNote, Skeleton } from '@/components/ui';
 import { friendlyError, type FriendlyError } from '@/lib/ui/errors';
-import { MoveSolToSui } from '@/components/MoveSolToSui';
 import { recordSend } from '@/lib/history/store';
 import { zkLoginSignAndExecute } from '@/lib/zklogin/execute';
 import { suiTxUrl, suiObjectUrl, IKA_ACQUIRE_URL } from '@/lib/config/network';
@@ -40,6 +39,7 @@ const IKA_LOGO = 'https://coin-images.coingecko.com/coins/images/67598/large/ika
 export function SuiWalletView({
   address,
   solana,
+  onSwap,
 }: {
   address: string;
   /**
@@ -49,6 +49,8 @@ export function SuiWalletView({
    * withdraw form are useful on their own, and the move-in panel simply does not appear.
    */
   solana?: { address: string; balance: string | null; dwalletId: string; dwalletCapId: string };
+  /** Take the user to the swap flow. Omitted when there is nowhere to send them. */
+  onSwap?: () => void;
 }) {
   const suiClient = useSuiClient() as AppSuiClient;
 
@@ -195,16 +197,27 @@ export function SuiWalletView({
         </div>
       </div>
 
-      {/* Topping up from Solana sits next to the balances that run out, which is where someone will look. */}
-      {solana && (
-        <MoveSolToSui
-          solanaAddress={solana.address}
-          suiAddress={address}
-          solBalance={solana.balance}
-          dwalletId={solana.dwalletId}
-          dwalletCapId={solana.dwalletCapId}
-          onArrived={() => void load()}
-        />
+      {/*
+        A pointer to the swap flow, not a second copy of it.
+        
+        Topping up from Solana belongs next to the balances that run out — that is where someone looks when
+        they are short of gas. But the swap itself has terms worth reading, so it lives on its own page and
+        this only carries the user there.
+      */}
+      {solana && onSwap && (
+        <button
+          type="button"
+          onClick={onSwap}
+          className="card p-3 w-full flex items-center justify-between gap-3 text-left hover:border-[var(--border-strong)] transition-colors cursor-pointer"
+        >
+          <span className="min-w-0">
+            <span className="text-sm font-bold block">Short on SUI? Swap from Solana</span>
+            <span className="text-[11px] text-[var(--muted)] block mt-0.5">
+              Sends SOL from your Solana wallet and credits native SUI here
+            </span>
+          </span>
+          <ArrowRight className="w-4 h-4 shrink-0 text-[var(--muted)]" aria-hidden />
+        </button>
       )}
 
       {/* Balances — also the asset selector for the send form */}

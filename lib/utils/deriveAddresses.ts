@@ -110,30 +110,6 @@ export function deriveBitcoinAddress(publicKey: string): string {
 }
 
 /**
- * Base58 encoding for Bitcoin addresses
- */
-function base58Encode(buffer: Buffer): string {
-  const ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
-  const base = BigInt(58);
-
-  let num = BigInt('0x' + buffer.toString('hex'));
-  let encoded = '';
-
-  while (num > 0) {
-    const remainder = Number(num % base);
-    num = num / base;
-    encoded = ALPHABET[remainder] + encoded;
-  }
-
-  // Add leading '1's for leading zero bytes
-  for (let i = 0; i < buffer.length && buffer[i] === 0; i++) {
-    encoded = '1' + encoded;
-  }
-
-  return encoded;
-}
-
-/**
  * Derive Solana address from ED25519 public key
  * Solana uses base58-encoded public key as address
  */

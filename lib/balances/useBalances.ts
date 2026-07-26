@@ -85,18 +85,26 @@ export function useBalances(targets: BalanceTarget[]): UseBalancesResult {
  * `UpdatedAgo` in app/page.tsx for the intended shape.
  */
 export function useAgeLabel(updatedAt: number): string {
-  const [, tick] = useState(0);
+  /**
+   * The clock is held in state rather than read during render.
+   *
+   * `Date.now()` in a render body makes the render impure: the same props produce a different result each
+   * time, which React is free to call more than once and to discard. Ticking a stored timestamp keeps the
+   * render a pure function of its inputs, and the label still updates once a second because the tick is
+   * what re-renders it.
+   */
+  const [now, setNow] = useState(updatedAt);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
-    timer.current = setInterval(() => tick((n) => n + 1), 1_000);
+    timer.current = setInterval(() => setNow(Date.now()), 1_000);
     return () => {
       if (timer.current) clearInterval(timer.current);
     };
   }, []);
 
   if (!updatedAt) return 'never';
-  const seconds = Math.max(0, Math.round((Date.now() - updatedAt) / 1000));
+  const seconds = Math.max(0, Math.round((now - updatedAt) / 1000));
   if (seconds < 5) return 'just now';
   if (seconds < 60) return `${seconds}s ago`;
   const minutes = Math.round(seconds / 60);

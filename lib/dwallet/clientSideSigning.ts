@@ -25,7 +25,7 @@ import { generateDeterministicEncryptionSeed } from './core/encryption';
 import { getChainSigner } from './chains';
 import { getIkaClient, chainCrypto } from '@/lib/ika/ikaClient';
 import { takeReady, pendingPresign, primePresignPool, refillInBackground } from '@/lib/ika/presignPool';
-import { peekUserShare, prepareUserShare } from '@/lib/ika/userShare';
+import { peekUserShare } from '@/lib/ika/userShare';
 import { ensureProtocolPublicParameters } from '@/lib/ika/protocolParams';
 import { generateEncryptionKeys } from './core/encryption';
 import { getDWalletMeta } from './dwalletMeta';
@@ -642,7 +642,7 @@ export async function signWithDWallet(
     debug('📋 Signature length:', signatureHex.length - 2, 'bytes');
 
     // Extract r and s from signature (64 bytes total: 32 for r, 32 for s)
-    let r = '0x' + signatureHex.slice(2, 66);
+    const r = '0x' + signatureHex.slice(2, 66);
     let s = '0x' + signatureHex.slice(66, 130);
     debug('📋 Raw r:', r);
     debug('📋 Raw s:', s);
@@ -727,7 +727,7 @@ export async function signWithDWallet(
             foundV = v;
             foundAddress = recoveredFrom;
           }
-        } catch (e) {
+        } catch {
           // Invalid signature, continue
           continue;
         }
@@ -852,7 +852,7 @@ export async function broadcastTransaction(
     console.log('📡 Broadcasting Solana transaction...');
 
     // Deserialize the transaction
-    let txBuffer = Buffer.from(serialized, 'base64');
+    const txBuffer = Buffer.from(serialized, 'base64');
     let txSignature: string;
 
     try {

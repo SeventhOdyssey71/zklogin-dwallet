@@ -64,6 +64,12 @@ function useZkLoginState(initiallySignedIn: boolean) {
   const [loading, setLoading] = useState(initiallySignedIn);
 
   const refresh = useCallback(async () => {
+    /**
+     * Yield before touching state, for the same reason as the dashboard's `load`: this is called from an
+     * effect on mount, and the no-key path below would otherwise setState synchronously inside it and
+     * cascade a second render of everything under the provider.
+     */
+    await Promise.resolve();
     // Same short-circuit: no local key means no usable session, so skip the request entirely.
     if (loadEphemeral() === null) {
       setUser(null);
@@ -88,6 +94,9 @@ function useZkLoginState(initiallySignedIn: boolean) {
   }, []);
 
   useEffect(() => {
+    // See the note on `load` in AppShell: `refresh` yields before touching state, and the rule matches the
+    // call site rather than following the await.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void refresh();
   }, [refresh]);
 

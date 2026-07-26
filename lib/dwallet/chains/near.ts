@@ -144,7 +144,7 @@ export class NearSigner implements ChainSigner {
     console.log('📡 Broadcasting transaction to NEAR mainnet...');
 
     try {
-      const { transaction, publicKey, utils, transactions } = unsignedTx;
+      const { transaction, transactions } = unsignedTx;
 
       // ED25519 signature is 64 bytes
       const signatureBytes = signature.slice(0, 64);

@@ -346,6 +346,78 @@ export function Modal({
  * `block` rather than `inline-block` so it can be a flex child and take `flex-1` — skeleton rows that
  * mirror a real layout need to stretch the same way the content will.
  */
+/**
+ * Numbered progress across a short, linear flow: Fund → Create → Ready, Amount → Review → Settling → Done.
+ *
+ * Lives here because two unrelated flows need the same thing. Onboarding's version was written first and
+ * `FlowStepper` still owns the vocabulary for setup; this is the shape both draw.
+ *
+ * Each phase is a step the USER takes, not a stage the machine passes through — a stepper that advances on
+ * its own implies work still to do and makes a running job look stalled.
+ */
+export function Stepper({
+  phases,
+  current,
+  label,
+}: {
+  phases: readonly string[];
+  /** Index of the active phase. Everything before it renders as complete. */
+  current: number;
+  /** Accessible name for the nav landmark, e.g. "Setup progress". */
+  label: string;
+}) {
+  return (
+    <nav aria-label={label}>
+      <ol className="flex items-center">
+        {phases.map((name, i) => {
+          const done = i < current;
+          const active = i === current;
+          const last = i === phases.length - 1;
+          return (
+            <li
+              key={name}
+              // `aria-current="step"` is the only signal a screen reader gets; the ring and brighter
+              // label are invisible to it.
+              aria-current={active ? 'step' : undefined}
+              className={`flex items-center gap-2 min-w-0 ${last ? '' : 'flex-1'}`}
+            >
+              <span
+                className={`w-6 h-6 shrink-0 rounded-full grid place-items-center text-[10px] font-bold border transition ${
+                  done
+                    ? 'bg-[var(--foreground)] text-black border-[var(--foreground)]'
+                    : active
+                      ? 'border-[var(--foreground)] text-[var(--foreground)]'
+                      : 'border-[var(--border)] text-[var(--muted-2)]'
+                }`}
+              >
+                {done ? <Check className="w-3 h-3" aria-hidden /> : i + 1}
+              </span>
+              <span
+                className={`mono-label truncate ${
+                  active ? 'text-[var(--foreground)]' : done ? '' : 'text-[var(--muted-2)]'
+                }`}
+              >
+                {name}
+                {done && <span className="sr-only"> (complete)</span>}
+              </span>
+              {/* The connector belongs to the step before it, so it fills whatever width is left after
+                  both labels — which is how the row stays on one line at 375px. */}
+              {!last && (
+                <span
+                  aria-hidden
+                  className={`h-px flex-1 min-w-3 ml-1 ${
+                    done ? 'bg-[var(--border-strong)]' : 'bg-[var(--border)]'
+                  }`}
+                />
+              )}
+            </li>
+          );
+        })}
+      </ol>
+    </nav>
+  );
+}
+
 export function Skeleton({ className = 'h-3 w-16' }: { className?: string }) {
   return <span aria-hidden className={`skeleton block ${className}`} />;
 }

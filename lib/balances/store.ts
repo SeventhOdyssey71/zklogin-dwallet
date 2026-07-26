@@ -182,7 +182,7 @@ export function read(target: Target, options: { force?: boolean } = {}): Promise
 
   const job = (async (): Promise<Entry> => {
     try {
-      const value = await fetchChainBalance(target.chain, target.address, target.curve);
+      const value = await fetchChainBalance(target.chain, target.address);
       const entry: Entry = { ...value, at: Date.now(), loading: false };
       consecutiveFailures.delete(k);
 

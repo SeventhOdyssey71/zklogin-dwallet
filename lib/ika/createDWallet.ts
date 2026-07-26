@@ -27,7 +27,6 @@ import {
 } from '@ika.xyz/sdk';
 import { ethers } from 'ethers';
 import type { AppSuiClient } from '@/lib/sui/client';
-import { IKA_CONFIG } from '@/lib/config/network';
 import { prepareIkaFeeCoin } from '@/lib/ika/ikaFee';
 import { getIkaClient } from '@/lib/ika/ikaClient';
 import { getShareEncryptionKeys } from '@/lib/ika/shareKeys';

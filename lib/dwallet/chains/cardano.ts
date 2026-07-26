@@ -11,7 +11,6 @@
  */
 
 import { ChainSigner, UnsignedTransaction, SignedTransactionResult } from '../core/types';
-import { CARDANO_MAINNET } from '../../config/chains';
 
 /**
  * Cardano chain signer for mainnet
@@ -181,7 +180,7 @@ export class CardanoSigner implements ChainSigner {
     console.log('📡 Broadcasting transaction to Cardano mainnet...');
 
     try {
-      const { txBody, fromAddress, publicKey, CardanoWasm } = unsignedTx;
+      const { txBody, publicKey, CardanoWasm } = unsignedTx;
 
       // ED25519 signature is 64 bytes
       const signatureBytes = signature.slice(0, 64);

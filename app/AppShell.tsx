@@ -17,6 +17,7 @@ import { listDWallets } from '@/lib/ika/listDWallets';
 import { CHAINS } from '@/lib/config/chainRegistry';
 import { SuiWalletView } from '@/components/SuiWalletView';
 import { HistoryView } from '@/components/HistoryView';
+import { SwapView } from '@/components/SwapView';
 import { LandingPage } from '@/components/landing/LandingPage';
 import { Onboarding, type OnboardStage } from '@/components/onboarding/Onboarding';
 import { DashboardOverview } from '@/components/dashboard/DashboardOverview';
@@ -98,7 +99,7 @@ const CHAIN_ORDER = [
   'Cardano',
 ];
 
-const TAB_KEYS: NavTab[] = ['create', 'all', 'history', 'sui'];
+const TAB_KEYS: NavTab[] = ['create', 'all', 'swap', 'history', 'sui'];
 
 /**
  * Keep the active tab in the URL hash.
@@ -141,6 +142,18 @@ export function AppShell({ initiallySignedIn }: { initiallySignedIn: boolean }) 
    * belongs to the dashboard. Holding it here means the Sui page does not repeat that work, and the panel
    * simply does not render until it is known.
    */
+  /**
+   * Refresh Sui and IKA once a swap credits, so the balances the user came for are the ones they see.
+   * Stable so `SwapView`'s memo is not defeated by a new identity on every shell render.
+   */
+  const goToSwap = useCallback(() => setTab('swap'), [setTab]);
+
+  const handleSwapArrived = useCallback(() => {
+    void import('@/lib/balances/store').then((m) => {
+      m.refreshSoon('Sui');
+    });
+  }, []);
+
   const [solanaSource, setSolanaSource] = useState<
     { address: string; balance: string | null; dwalletId: string; dwalletCapId: string } | undefined
   >(undefined);
@@ -234,9 +247,38 @@ export function AppShell({ initiallySignedIn }: { initiallySignedIn: boolean }) 
                   onSolanaSource={handleSolanaSource}
                 />
               )}
+              {view === 'swap' && account && (
+                /*
+                 * Gated on discovery rather than rendered empty: without a Solana dWallet there is nothing
+                 * to swap FROM, and an amount field over an account that cannot pay is a dead end.
+                 */
+                solanaSource ? (
+                  <SwapView
+                    solanaAddress={solanaSource.address}
+                    suiAddress={account.address}
+                    dwalletId={solanaSource.dwalletId}
+                    dwalletCapId={solanaSource.dwalletCapId}
+                    onArrived={handleSwapArrived}
+                  />
+                ) : (
+                  <div className="card p-6 text-center space-y-2">
+                    <p className="text-sm">No Solana wallet yet.</p>
+                    <p className="text-xs text-[var(--muted)]">
+                      Swapping to Sui sends SOL from your Solana dWallet, so create your wallets first.
+                    </p>
+                    <Button variant="secondary" size="sm" onClick={() => setTab('create')}>
+                      Create my wallets
+                    </Button>
+                  </div>
+                )
+              )}
               {view === 'history' && account && <HistoryView address={account.address} />}
               {view === 'sui' && account && (
-                <SuiWalletView address={account.address} solana={solanaSource} />
+                <SuiWalletView
+                  address={account.address}
+                  solana={solanaSource}
+                  onSwap={goToSwap}
+                />
               )}
             </>
           )}
@@ -269,13 +311,22 @@ function CreateView({
   const [existing, setExisting] = useState<Set<DWalletKind>>(new Set());
   const [checking, setChecking] = useState(true);
 
+  /**
+   * The address, not the account object.
+   *
+   * The effect depended on `account?.address` while reading `account` inside it, so the two could not be
+   * checked against each other. Narrowing to the value actually used makes the dependency honest and keeps
+   * the intended behaviour: a new object for the same address should not re-run this.
+   */
+  const accountAddress = account?.address;
+
   useEffect(() => {
+    if (!accountAddress) return;
     let cancelled = false;
     (async () => {
-      if (!account) return;
       setChecking(true);
       try {
-        const wallets = await listDWallets(suiClient, account.address);
+        const wallets = await listDWallets(suiClient, accountAddress);
         const kinds = new Set<DWalletKind>(wallets.map((w) => w.curve as DWalletKind));
         if (!cancelled) setExisting(kinds);
       } catch {
@@ -287,7 +338,7 @@ function CreateView({
     return () => {
       cancelled = true;
     };
-  }, [account?.address, suiClient, result]);
+  }, [accountAddress, suiClient, result]);
 
   const hasBoth = ALL_KINDS.every((k) => existing.has(k));
 
@@ -409,6 +460,17 @@ function AllChainsView({
 
   const load = useCallback(async () => {
     if (!account) return;
+    /**
+     * Yield before touching state.
+     *
+     * This runs from an effect, and a setState in the synchronous part of an effect makes React render the
+     * whole dashboard twice on mount. A microtask is soon enough that no frame is missed, and late enough
+     * that the mount render is not thrown away.
+     *
+     * The reset cannot simply be dropped in favour of the initial `loading = true`: this reruns whenever
+     * the account changes, and without it the previous account's rows would sit on screen as if current.
+     */
+    await Promise.resolve();
     setLoading(true);
     setError(null);
     try {
@@ -486,9 +548,15 @@ function AllChainsView({
       setError(friendlyError(e));
       setLoading(false);
     }
-  }, [account, suiClient]);
+  }, [account, suiClient, onSolanaSource]);
 
   useEffect(() => {
+    /**
+     * Fetching on mount is what an effect is for, and `load` yields before it touches state, so the
+     * cascading render this rule exists to prevent does not happen. The rule matches the call site
+     * statically and cannot see past the await.
+     */
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     load();
   }, [load]);
 
@@ -574,7 +642,15 @@ function AllChainsView({
    * `onSent` reads the chain from a ref rather than closing over it, so its identity never changes.
    */
   const sendChainRef = useRef<string | null>(null);
-  sendChainRef.current = sendChain;
+  /**
+   * Synced in an effect, not during render — a render-phase ref write is not allowed.
+   *
+   * Safe to read in `handleSent` because that only ever fires from a completed send, long after the effect
+   * for the currently open dialog has run.
+   */
+  useEffect(() => {
+    sendChainRef.current = sendChain;
+  }, [sendChain]);
 
   const closeSend = useCallback(() => setSendChain(null), []);
   const handleSent = useCallback(() => {

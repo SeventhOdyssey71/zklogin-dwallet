@@ -13,8 +13,7 @@
  * what pushed the layout past the viewport edge.
  */
 
-import { useEffect, useState } from 'react';
-import { useSuiClient } from '@mysten/dapp-kit';
+import { useState } from 'react';
 import { Loader2, Menu, X } from 'lucide-react';
 import { ConnectWallet } from '@/components/ConnectWallet';
 import { Logo } from '@/components/brand/Logo';
@@ -23,13 +22,14 @@ import { useGasBalances } from '@/lib/sui/useGasBalances';
 const SUI_LOGO = 'https://cryptologos.cc/logos/sui-sui-logo.png';
 const IKA_LOGO = 'https://coin-images.coingecko.com/coins/images/67598/large/ika.jpg?1753770879';
 
-export type NavTab = 'create' | 'all' | 'history' | 'sui';
+export type NavTab = 'create' | 'all' | 'swap' | 'history' | 'sui';
 
 const TABS: { key: NavTab; label: string }[] = [
   { key: 'create', label: 'Create' },
   // The chain list is now the dashboard: it carries the portfolio total, every chain with send/receive,
   // and recent activity. Keeping the 'all' key means existing #all links still resolve.
   { key: 'all', label: 'Dashboard' },
+  { key: 'swap', label: 'Swap' },
   { key: 'history', label: 'History' },
   { key: 'sui', label: 'Sui wallet' },
 ];

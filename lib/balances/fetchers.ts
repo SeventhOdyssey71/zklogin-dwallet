@@ -157,11 +157,7 @@ function isUnusable(address: string): boolean {
  * `curve` selects the family the address belongs to, matching how addresses were derived: 0 is secp256k1
  * (Bitcoin plus every EVM chain, which share one address), anything else is an ed25519-family chain.
  */
-export async function fetchChainBalance(
-  chain: string,
-  address: string,
-  curve: number
-): Promise<Balance> {
+export async function fetchChainBalance(chain: string, address: string): Promise<Balance> {
   if (isUnusable(address)) return { balance: '0.000000', usdValue: 0 };
 
   const def = CHAIN_BY_ID[chain];
