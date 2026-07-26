@@ -343,8 +343,6 @@ function AllChainsView({
   const [error, setError] = useState<FriendlyError | null>(null);
   const [rows, setRows] = useState<ChainRow[]>([]);
   const [targets, setTargets] = useState<BalanceTarget[]>([]);
-  /** Chains whose balance changed from a realtime on-chain event, for the "live" highlight. */
-  const [justUpdated, setJustUpdated] = useState<Set<string>>(new Set());
 
   /**
    * Balances come from the shared store, not from this component.
@@ -439,19 +437,14 @@ function AllChainsView({
       if (cancelled) return;
       stop = watchDeposits({
         targets: targets.map((t) => ({ chain: t.chain, address: t.address })),
-        onActivity: (chain) => {
-          refreshSoon(chain);
-          setJustUpdated((prev) => new Set(prev).add(chain));
-          setTimeout(
-            () =>
-              setJustUpdated((prev) => {
-                const next = new Set(prev);
-                next.delete(chain);
-                return next;
-              }),
-            4_000
-          );
-        },
+        /**
+         * Refetch the chain, but do not flag it as "live".
+         *
+         * These events are block-scoped on EVM: `newHeads` fires on every block regardless of whether
+         * this address was involved, so treating one as a deposit lit up chains holding nothing. The
+         * refetch is still right — it is how a real deposit is noticed — but the visual claim was false.
+         */
+        onActivity: (chain) => refreshSoon(chain),
       });
     })();
 
@@ -557,10 +550,9 @@ function AllChainsView({
           balance: b?.at ? b.balance : undefined,
           usdValue: b?.at ? b.usdValue : undefined,
           stale: Boolean(b?.error),
-          live: justUpdated.has(r.chain),
         };
       }),
-    [ordered, balances, justUpdated]
+    [ordered, balances]
   );
 
   const dashboard = (

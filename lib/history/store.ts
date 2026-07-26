@@ -20,8 +20,15 @@
  * (Etherscan and friends), as do NEAR and Polkadot. Rather than show complete history on three chains
  * and silence on eleven, receives are labelled as detected and the limitation is stated in the UI.
  *
- * Stored per address in `localStorage`: it must outlive a tab (a history that forgets on refresh is not
- * a history), and it is not secret — every entry is public on chain.
+ * WHERE IT LIVES
+ * --------------
+ * Redis is the source of truth, via /api/history, so history belongs to the account rather than to one
+ * browser — sign in elsewhere and it follows you, clear site data and it survives. `localStorage` remains
+ * the local cache because it renders instantly and keeps working offline.
+ *
+ * Writes go to both: locally first so the UI updates immediately, then pushed to the server. A failed push
+ * is not fatal — the entry is still on this device and the next `syncFromServer` merges rather than
+ * replaces, so nothing is lost by being briefly out of step.
  */
 
 import { CHAIN_BY_ID } from '@/lib/config/chainRegistry';
@@ -82,6 +89,52 @@ export function readHistory(address: string): HistoryEntry[] {
   }
 }
 
+/**
+ * Push entries to the durable store.
+ *
+ * Fire-and-forget: the caller has already recorded locally, so a network failure must not surface as a
+ * failed send. The server merges by id, so re-sending an entry it already has is harmless.
+ */
+function pushToServer(entries: HistoryEntry[]): void {
+  if (entries.length === 0) return;
+  void fetch('/api/history', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ entries }),
+  }).catch(() => {
+    // Offline or signed out; the local copy stands and the next sync will merge it.
+  });
+}
+
+/**
+ * Pull the account's stored history and merge it with what this device holds.
+ *
+ * A merge, never a replace, in both directions: the server may hold entries recorded on another device,
+ * and this device may hold entries whose push failed. Whichever side is missing something gets it.
+ */
+export async function syncFromServer(address: string): Promise<void> {
+  if (!address || typeof window === 'undefined') return;
+  try {
+    const res = await fetch('/api/history', { cache: 'no-store' });
+    if (!res.ok) return;
+    const { entries } = (await res.json()) as { entries?: HistoryEntry[] };
+    if (!Array.isArray(entries)) return;
+
+    const local = readHistory(address);
+    const seen = new Set(local.map((e) => e.id));
+    const fromServer = entries.filter((e) => e?.id && !seen.has(e.id));
+    const localOnly = local.filter((e) => !entries.some((s) => s.id === e.id));
+
+    if (fromServer.length > 0) {
+      write(address, [...local, ...fromServer].sort((a, b) => b.at - a.at));
+    }
+    // Anything the server has never seen — typically a push that failed while offline.
+    if (localOnly.length > 0) pushToServer(localOnly);
+  } catch {
+    // Never let a sync failure break the view; the local ledger is still perfectly usable.
+  }
+}
+
 function write(address: string, list: HistoryEntry[]): void {
   const capped = list.slice(0, MAX_ENTRIES);
   memory.set(address, capped);
@@ -109,7 +162,9 @@ export function record(address: string, entry: Omit<HistoryEntry, 'id'> & { id?:
 
   const list = readHistory(address);
   if (list.some((e) => e.id === id)) return;
-  write(address, [{ ...entry, id }, ...list]);
+  const created = { ...entry, id } as HistoryEntry;
+  write(address, [created, ...list]);
+  pushToServer([created]);
 }
 
 /** Record a send we just broadcast. */

@@ -25,8 +25,6 @@ export interface DashboardChain {
   usdValue?: number;
   /** Set when the last read failed; the shown balance is stale. */
   stale?: boolean;
-  /** True briefly after a realtime deposit was detected on this chain. */
-  live?: boolean;
 }
 
 export interface DashboardActivity {

@@ -18,7 +18,6 @@
  */
 
 import { memo, useState } from 'react';
-import { AnimatePresence, motion } from 'framer-motion';
 import { AlertTriangle, ArrowDownLeft, ArrowUpRight } from 'lucide-react';
 import { Button, Skeleton } from '@/components/ui';
 import { formatUsd, trimAmount } from './shared';
@@ -63,7 +62,6 @@ export interface ChainCardProps {
   balance?: string;
   usdValue?: number;
   stale?: boolean;
-  live?: boolean;
   onSend: (chain: string) => void;
   onReceive: (chain: string) => void;
 }
@@ -75,7 +73,6 @@ function ChainCardImpl({
   balance,
   usdValue,
   stale,
-  live,
   onSend,
   onReceive,
 }: ChainCardProps) {
@@ -87,7 +84,7 @@ function ChainCardImpl({
       // shimmer itself is decorative and hidden from the accessibility tree.
       aria-busy={pending || undefined}
       className={`card p-4 flex flex-col gap-3.5 transition-colors ${
-        live ? 'border-[var(--success-border)]' : ''
+        ''
       }`}
     >
       <div className="flex items-start justify-between gap-2">
@@ -100,24 +97,6 @@ function ChainCardImpl({
         </div>
 
         <div className="shrink-0 flex flex-col items-end gap-1">
-          <AnimatePresence>
-            {live && (
-              <motion.span
-                initial={{ opacity: 0, scale: 0.85 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.18 }}
-                title={`A deposit was just detected on ${chain}.`}
-                className="inline-flex items-center gap-1 text-[10px] uppercase tracking-[0.08em] text-[var(--success)] leading-none"
-              >
-                <span
-                  className="w-1.5 h-1.5 rounded-full bg-[var(--success)] animate-pulse"
-                  aria-hidden
-                />
-                live
-              </motion.span>
-            )}
-          </AnimatePresence>
           {stale && (
             <span
               title="The last balance read for this chain failed, so the figure shown may be out of date."

@@ -10,9 +10,9 @@
  * becomes a large one the moment someone tries to reconcile it against an explorer.
  */
 
-import { useMemo, useSyncExternalStore } from 'react';
+import { useEffect, useMemo, useSyncExternalStore } from 'react';
 import { ArrowDownLeft, ArrowUpRight, Inbox } from 'lucide-react';
-import { readHistory, subscribe, type HistoryEntry } from '@/lib/history/store';
+import { readHistory, subscribe, syncFromServer, type HistoryEntry } from '@/lib/history/store';
 import { txUrl } from '@/lib/config/chainRegistry';
 import { CopyField, truncate } from '@/components/ui';
 import { useChainAssets } from '@/components/ChainChips';
@@ -34,6 +34,11 @@ function dayLabel(at: number): string {
 
 export function HistoryView({ address }: { address: string }) {
   const assets = useChainAssets();
+
+  // Pull anything recorded on another device, and push anything this one holds that the server does not.
+  useEffect(() => {
+    void syncFromServer(address);
+  }, [address]);
 
   // The ledger is a plain external store, so this stays in step with a send recorded elsewhere without
   // either view having to know about the other.

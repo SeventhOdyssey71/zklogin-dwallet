@@ -152,7 +152,6 @@ export function DashboardOverview({
                 balance={c.balance}
                 usdValue={c.usdValue}
                 stale={c.stale}
-                live={c.live}
                 onSend={onSend}
                 onReceive={onReceive}
               />

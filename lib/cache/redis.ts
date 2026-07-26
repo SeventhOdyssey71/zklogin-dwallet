@@ -36,31 +36,62 @@ function warnOnce(message: string): void {
 }
 
 /**
- * Whether the URL is actually usable.
+ * Resolve the connection string.
  *
- * The example URL ships with an empty password so it can be filled in, and an unreplaced placeholder is a
- * half-finished config rather than a broken one. Either way, treat it as "no Redis" instead of failing
- * every request while someone is still editing the file.
+ * Two shapes are accepted because hosting dashboards hand out both: a single `REDIS_URL`, and the parts
+ * split across `REDIS_HOST` / `REDIS_PORT` / `REDIS_USERNAME` / `REDIS_PASSWORD`. Some providers show both, and the two can disagree:
+ * the copyable URL may embed `default` while the dashboard's Username field lists a different account — so
+ * taking only the URL would ignore a password supplied separately, and blindly preferring the dashboard
+ * username would authenticate as an account that has no permission.
+ *
+ * A URL whose password is empty is treated as unfilled rather than as a URL with no password. That is the
+ * state the example ships in, and attempting it would fail auth on every request instead of quietly
+ * falling back.
  */
-function isConfigured(url: string | undefined): url is string {
-  if (!url) return false;
-  if (url.includes("<PASSWORD>") || url.includes("PASSWORD@")) return false;
-  try {
-    const parsed = new URL(url);
-    // `redis://default:@host` — a blank password means it hasn't been filled in yet.
-    if (parsed.username && !parsed.password) return false;
-    return true;
-  } catch {
-    return false;
+function resolveUrl(): string | null {
+  const raw = process.env.REDIS_URL?.trim();
+
+  if (raw && !raw.includes('<PASSWORD>') && !raw.includes('PASSWORD@')) {
+    try {
+      const parsed = new URL(raw);
+      if (parsed.password) return raw;
+      /**
+       * Password missing from the URL but supplied separately: fill it in and keep everything else.
+       *
+       * Specifically do NOT substitute `REDIS_USERNAME` here. Measured against a real managed instance: the
+       * dashboard listed a per-project username alongside a URL embedding `default`, and only `default`
+       * authenticated — the other was rejected with "WRONGPASS invalid username-password pair or user is
+       * disabled". The username already written into the URL is the one that works, so it wins.
+       */
+      const password = process.env.REDIS_PASSWORD?.trim();
+      if (password) {
+        parsed.password = encodeURIComponent(password);
+        return parsed.toString();
+      }
+    } catch {
+      // Fall through to the split form.
+    }
   }
+
+  const host = process.env.REDIS_HOST?.trim();
+  const password = process.env.REDIS_PASSWORD?.trim();
+  if (host && password) {
+    const port = process.env.REDIS_PORT?.trim() || '6379';
+    // `default` unless overridden, for the same reason as above: provider dashboards list usernames that
+    // are not necessarily the ones with permission.
+    const username = process.env.REDIS_USERNAME?.trim() || 'default';
+    return `redis://${encodeURIComponent(username)}:${encodeURIComponent(password)}@${host}:${port}/0`;
+  }
+
+  return null;
 }
 
 /** The shared client, or null when Redis isn't configured or couldn't be created. */
 export function redis(): Redis | null {
   if (g.__appRedis !== undefined) return g.__appRedis;
 
-  const url = process.env.REDIS_URL;
-  if (!isConfigured(url)) {
+  const url = resolveUrl();
+  if (!url) {
     g.__appRedis = null;
     return null;
   }
