@@ -38,7 +38,13 @@
 
 const BASE = 'https://1click.chaindefuser.com/v0';
 
-/** Generous by design: this is the refund trigger, not a quote expiry, and a tight value risks a stuck deposit. */
+/**
+ * When an unfilled swap starts refunding.
+ *
+ * Generous by design: this is the refund TRIGGER, not a quote expiry, so a tight value risks refunding a
+ * swap that was about to fill. Settlement measured ~35s, so an hour is roughly a hundred times the
+ * observed time and still bounds the wait to something a person will sit through.
+ */
 const DEADLINE_MS = 60 * 60 * 1000;
 
 /** Requests time out rather than hanging a dialog. */
@@ -65,7 +71,7 @@ interface OneClickResponse {
     depositAddress?: string;
     deadline?: string;
   };
-  quoteRequest?: { deadline?: string };
+  quoteRequest?: { deadline?: string; refundTo?: string };
   signature?: string;
 }
 
@@ -97,6 +103,15 @@ export interface IntentQuote {
   timeEstimate?: number;
   /** The service signing its own quote back to us. Nothing for us to countersign. */
   signature?: string;
+  /**
+   * When an unfilled swap begins refunding — the deadline we REQUESTED, echoed back.
+   *
+   * Distinct from `deadline`, which is this plus 72 hours and is when the deposit address dies. This is
+   * the one a user cares about: the moment they stop waiting and get their money back.
+   */
+  refundsAt?: string;
+  /** Where a refund is sent. Echoed back so the UI can state it rather than assume it. */
+  refundTo?: string;
 }
 
 export type IntentStatus =
@@ -214,6 +229,17 @@ export interface QuoteRequest {
  * starts the 72-hour clock on it, so it should only happen once they have committed.
  */
 export async function quote(request: QuoteRequest): Promise<IntentQuote> {
+  /**
+   * A refund needs somewhere to go, and this is the last place that can still be checked cheaply.
+   *
+   * If `refundTo` were ever empty the service would either reject the quote or, worse, accept it and have
+   * nowhere to return an unfilled deposit. Refusing here converts a possible loss of funds into an error
+   * before anything is reserved and before anything is signed.
+   */
+  if (!request.refundTo || !request.refundTo.trim()) {
+    throw new IntentError('Refusing to quote without a refund address.');
+  }
+
   const deadline = new Date(Date.now() + DEADLINE_MS).toISOString();
 
   const response = await call<OneClickResponse>('/quote', {
@@ -235,7 +261,13 @@ export async function quote(request: QuoteRequest): Promise<IntentQuote> {
   });
 
   // Flatten, so callers never have to know the numbers live one level down.
-  return { ...response.quote, signature: response.signature };
+  return {
+    ...response.quote,
+    signature: response.signature,
+    // Prefer the value the service echoed; fall back to what we asked for.
+    refundsAt: response.quoteRequest?.deadline ?? deadline,
+    refundTo: request.refundTo,
+  };
 }
 
 /**

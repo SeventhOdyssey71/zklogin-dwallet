@@ -66,14 +66,28 @@ async function solanaBalance(address: string): Promise<Balance> {
 
 /* ------------------------------- NEAR ------------------------------ */
 
+/**
+ * Does this error mean "no such account" rather than "the node is broken"?
+ *
+ * Matched against the whole serialised JSON-RPC error, because the wording moves: drpc puts it in `data`
+ * ("account … does not exist while viewing"), fastnear in `cause.name` ("UNKNOWN_ACCOUNT").
+ */
+const NEAR_NO_ACCOUNT = /does not exist|UNKNOWN_ACCOUNT|is not found/i;
+
 async function nearBalance(address: string): Promise<Balance> {
   try {
-    const result = (await callRpc('NEAR', NEAR_ENDPOINTS, {
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'query',
-      params: { request_type: 'view_account', finality: 'final', account_id: address },
-    })) as { amount?: string };
+    const result = (await callRpc(
+      'NEAR',
+      NEAR_ENDPOINTS,
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'query',
+        params: { request_type: 'view_account', finality: 'final', account_id: address },
+      },
+      undefined,
+      (message) => NEAR_NO_ACCOUNT.test(message)
+    )) as { amount?: string };
     return { balance: fromBaseUnits(BigInt(result?.amount ?? '0'), 24), usdValue: 0 };
   } catch (e) {
     /**
@@ -81,8 +95,7 @@ async function nearBalance(address: string): Promise<Balance> {
      * than a zero balance. That is the normal state of a freshly derived dWallet address, so it must not
      * be treated as a failure — the old code logged it on every single refresh.
      */
-    const message = (e as Error).message;
-    if (/does not exist|UNKNOWN_ACCOUNT|is not found/i.test(message)) {
+    if (NEAR_NO_ACCOUNT.test((e as Error).message)) {
       return { balance: '0.000000', usdValue: 0 };
     }
     throw e;

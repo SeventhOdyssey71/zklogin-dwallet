@@ -161,7 +161,22 @@ export function quiet(key: string, message: string, level: 'warn' | 'error' = 'w
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-export class RpcError extends Error {}
+export class RpcError extends Error {
+  /**
+   * True when the endpoint answered correctly and the JSON-RPC payload itself carried an error.
+   *
+   * The distinction decides whether the endpoint gets penalised. "This account does not exist" is a
+   * complete, correct answer from a healthy node; treating it as a fault is what marked all five NEAR
+   * endpoints unhealthy for 60s every time an unfunded dWallet address was read.
+   */
+  readonly application: boolean;
+
+  constructor(message: string, options: { application?: boolean } = {}) {
+    super(message);
+    this.name = 'RpcError';
+    this.application = options.application === true;
+  }
+}
 
 /** One rate-limited, time-boxed request. */
 async function requestOnce(url: string, body: unknown, signal?: AbortSignal): Promise<unknown> {
@@ -182,9 +197,24 @@ async function requestOnce(url: string, body: unknown, signal?: AbortSignal): Pr
       signal: controller.signal,
     });
     if (!res.ok) throw new RpcError(`HTTP ${res.status}`);
-    const json = (await res.json()) as { error?: { message?: string }; result?: unknown };
+    const json = (await res.json()) as { error?: unknown; result?: unknown };
     // Some hosts return an error body with HTTP 200, so the status alone is not enough.
-    if (json.error) throw new RpcError(json.error.message ?? 'rpc error');
+    if (json.error) {
+      /**
+       * Carry the WHOLE error, not just `.message`.
+       *
+       * The reason is rarely in the field you expect: for the same missing NEAR account, drpc says
+       * `{message:"Server error", data:"account … does not exist"}` while fastnear says
+       * `{name:"HANDLER_ERROR", cause:{name:"UNKNOWN_ACCOUNT"}}` and has no `message` at all. Keeping
+       * only `.message` reduced both to "Server error" and "rpc error", so callers could not tell an
+       * expected empty account from a broken node.
+       */
+      const detail = (json.error as { message?: string })?.message;
+      throw new RpcError(
+        `${typeof detail === 'string' ? detail : 'rpc error'} ${JSON.stringify(json.error)}`,
+        { application: true }
+      );
+    }
     return json.result;
   } finally {
     clearTimeout(timer);
@@ -204,7 +234,15 @@ export async function callRpc(
   label: string,
   urls: string[],
   body: unknown,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  /**
+   * Recognises an error every endpoint would answer identically.
+   *
+   * Without it, "this account does not exist" is asked of all five NEAR endpoints on every poll — five
+   * requests for a fact the first one already settled. Returning true stops the rotation and rethrows
+   * immediately, so the caller can turn it into a zero balance.
+   */
+  isFinal?: (message: string) => boolean
 ): Promise<unknown> {
   const usable = urls.filter(isUsable);
   const order = usable.length > 0 ? usable : urls.slice(0, 1);
@@ -221,7 +259,12 @@ export async function callRpc(
       if (signal?.aborted) throw e;
       const err = e as Error;
       lastError = `${hostOf(url)}: ${err.name === 'AbortError' ? 'timeout' : err.message}`;
-      recordFailure(url);
+
+      // A JSON-RPC error means the endpoint worked. Only transport faults count against its health.
+      const application = e instanceof RpcError && e.application;
+      if (!application) recordFailure(url);
+      // Every endpoint would answer this identically, so asking the rest is pure latency.
+      if (application && isFinal?.(err.message)) throw e;
     }
   }
 

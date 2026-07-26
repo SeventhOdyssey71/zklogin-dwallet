@@ -31,13 +31,14 @@
  * choosing over a bridge integration.
  */
 
-import { memo, useCallback, useEffect, useState, useSyncExternalStore } from 'react';
+import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { ArrowDown, Check, ExternalLink, Loader2 } from 'lucide-react';
 import { useSuiClient } from '@mysten/dapp-kit';
 import { toast } from 'sonner';
 import { Button, CopyField, ErrorNote, Skeleton, Stepper, truncate } from '@/components/ui';
 import { friendlyError, type FriendlyError } from '@/lib/ui/errors';
 import { zkLoginSignAndExecute } from '@/lib/zklogin/execute';
+import { warmSendPath } from '@/lib/ika/warmSendPath';
 import { peek as peekBalance, subscribe as subscribeBalances } from '@/lib/balances/store';
 import { txUrl } from '@/lib/config/chainRegistry';
 import {
@@ -145,6 +146,26 @@ export const SwapView = memo(function SwapView({
   const [depositTx, setDepositTx] = useState<string | null>(null);
   const [creditTx, setCreditTx] = useState<string | null>(null);
   const [minimum, setMinimum] = useState<number | null>(null);
+  /** When the confirm was pressed, for the elapsed clock. Captured in the handler, never in render. */
+  const [startedAt, setStartedAt] = useState<number | null>(null);
+
+  /**
+   * Warm the signing path the moment this page is open.
+   *
+   * The measured swap spent 423ms buying a presignature inline and 12.4s in `sign tx (zkLogin submit)`,
+   * which mints the Groth16 proof. Neither depends on the amount or the deposit address, so neither
+   * belongs between pressing Confirm and the transfer going out. Landing on this page is intent enough.
+   *
+   * Re-warmed on entering Review as well: someone can sit on the amount field long enough for the banked
+   * presignature to have been spent by a send in another tab.
+   */
+  const warmed = useRef(false);
+  useEffect(() => {
+    if (phase !== 'amount' && phase !== 'review') return;
+    if (phase === 'amount' && warmed.current) return;
+    warmed.current = true;
+    void warmSendPath({ suiClient, zkAddress: suiAddress, dwalletId, chain: 'Solana' });
+  }, [phase, suiClient, suiAddress, dwalletId]);
 
   const requested = parseFloat(amount) || 0;
   const overBalance = available !== null && requested > available;
@@ -298,6 +319,7 @@ export const SwapView = memo(function SwapView({
    */
   const confirm = async () => {
     setError(null);
+    setStartedAt(Date.now());
     setPhase('committing');
     setStatusLine('Locking the rate…');
     try {
@@ -371,6 +393,7 @@ export const SwapView = memo(function SwapView({
     setCreditTx(null);
     setAmount('');
     setError(null);
+    setStartedAt(null);
   };
 
   const settling = phase === 'committing' || phase === 'signing' || phase === 'watching';
@@ -495,6 +518,8 @@ export const SwapView = memo(function SwapView({
             />
             <Row label="Max slippage" value={`${SLIPPAGE_BPS / 100}%`} />
             <Row label="Estimated time" value={`~${preview?.timeEstimate ?? 35}s`} />
+            {/* Named, not implied: this is the promise that makes the risk above acceptable. */}
+            <Row label="Refunds to" value={truncate(solanaAddress, 6, 6)} />
           </div>
 
           {/*
@@ -524,6 +549,13 @@ export const SwapView = memo(function SwapView({
 
       {settling && (
         <div className="card p-4 space-y-3">
+          <div className="flex items-baseline justify-between">
+            <span className="mono-label">Elapsed</span>
+            <span className="text-sm">
+              {startedAt !== null && <Elapsed since={startedAt} />}
+              <span className="mono-label ml-2">of ~{preview?.timeEstimate ?? 35}s expected</span>
+            </span>
+          </div>
           <ol className="space-y-2.5">
             {TIMELINE.map((step) => {
               const at = TIMELINE_ORDER.indexOf(phase);
@@ -565,10 +597,22 @@ export const SwapView = memo(function SwapView({
               href={txUrl('Solana', depositTx) ?? undefined}
             />
           )}
-          {terms?.deadline && phase === 'watching' && (
-            <p className="text-[11px] text-[var(--muted)]">
-              Leaving this page does not cancel the swap — it settles on its own.
-            </p>
+          {phase === 'watching' && (
+            <>
+              {terms?.refundsAt && (
+                <div className="flex items-baseline justify-between rounded-[var(--radius-sm)] bg-[var(--surface-2)] px-3 py-2">
+                  <span className="mono-label">Auto-refund in</span>
+                  <span className="text-sm">
+                    <Countdown to={terms.refundsAt} />
+                    <span className="mono-label ml-2">to {truncate(solanaAddress, 6, 6)}</span>
+                  </span>
+                </div>
+              )}
+              <p className="text-[11px] text-[var(--muted)] leading-relaxed">
+                Leaving this page does not cancel the swap — it settles on its own, and an unfilled order
+                refunds to your Solana wallet without any further signature from you.
+              </p>
+            </>
           )}
         </div>
       )}
@@ -589,8 +633,8 @@ export const SwapView = memo(function SwapView({
           )}
           {status === 'REFUNDED' && (
             <p className="text-sm text-[var(--warning)]">
-              No solver filled the order, so your SOL was refunded to the account it came from. Nothing was
-              lost beyond the network fee.
+              No solver filled the order, so your SOL was refunded to {truncate(solanaAddress, 6, 6)} — the
+              account it came from. Nothing was lost beyond the network fee.
             </p>
           )}
           {status === 'FAILED' && (
@@ -631,6 +675,78 @@ export const SwapView = memo(function SwapView({
     </div>
   );
 });
+
+/**
+ * Seconds since a start point, as m:ss.
+ *
+ * A leaf on purpose. It re-renders once a second, and anything it is mixed into re-renders with it — the
+ * same mistake that made the balance list, and the send dialog inside it, stutter at 1Hz.
+ *
+ * The clock is in state rather than read during render: `Date.now()` in a render body makes the render
+ * impure, since the same props would produce a different result on every call.
+ */
+function Elapsed({ since }: { since: number }) {
+  const [now, setNow] = useState(since);
+  useEffect(() => {
+    const tick = () => setNow(Date.now());
+    /**
+     * Corrected immediately, then every second.
+     *
+     * State starts at `since` so the first render is pure, which reads 0:00 — right when the clock starts
+     * with the swap, wrong if this remounts partway through (switching tabs and back). The zero-delay
+     * timeout fixes that within the frame; a setState in the effect body would cascade a second render.
+     */
+    const first = setTimeout(tick, 0);
+    const every = setInterval(tick, 1_000);
+    return () => {
+      clearTimeout(first);
+      clearInterval(every);
+    };
+  }, []);
+  const seconds = Math.max(0, Math.round((now - since) / 1000));
+  return (
+    <span className="num tabular-nums">
+      {Math.floor(seconds / 60)}:{String(seconds % 60).padStart(2, '0')}
+    </span>
+  );
+}
+
+/**
+ * Time left before an unfilled swap refunds, counted down.
+ *
+ * Shown once there is money in flight, because that is when "how long can this go on?" becomes the
+ * question. It is a promise, not a warning: reaching zero means the funds come back.
+ */
+function Countdown({ to }: { to: string }) {
+  const target = new Date(to).getTime();
+  const [now, setNow] = useState(target);
+  useEffect(() => {
+    const tick = () => setNow(Date.now());
+    /**
+     * The first correction is scheduled, not synchronous.
+     *
+     * State starts at `target` so the first render is pure and needs no clock, but that renders zero — so
+     * it has to be corrected immediately rather than a second later. A zero-delay timeout does that within
+     * the same frame without a setState inside the effect body, which would cascade a second render.
+     */
+    const first = setTimeout(tick, 0);
+    const every = setInterval(tick, 1_000);
+    return () => {
+      clearTimeout(first);
+      clearInterval(every);
+    };
+  }, []);
+  if (!Number.isFinite(target)) return null;
+  const left = Math.max(0, target - now);
+  if (left === 0) return <span className="num">refunding</span>;
+  const m = Math.floor(left / 60_000);
+  const s = Math.floor((left % 60_000) / 1000);
+  return (
+    <span className="num tabular-nums">
+      {m}:{String(s).padStart(2, '0')}
+    </span>
+  );
+}
 
 /** One line of a terms table. `strong` marks the two numbers the decision actually turns on. */
 function Row({ label, value, strong }: { label: string; value: string; strong?: boolean }) {

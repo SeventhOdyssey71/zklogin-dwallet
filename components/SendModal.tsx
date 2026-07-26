@@ -13,9 +13,9 @@ import { memo, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { ArrowRight } from 'lucide-react';
 import { useSuiClient } from '@mysten/dapp-kit';
-import type { Curve } from '@ika.xyz/sdk';
 import { signWithDWallet, broadcastTransaction } from '@/lib/dwallet/clientSideSigning';
 import { zkLoginSignAndExecute } from '@/lib/zklogin/execute';
+import { warmSendPath } from '@/lib/ika/warmSendPath';
 import { validateAddress, type AddressCheck } from '@/lib/utils/validateAddress';
 import { friendlyError, type FriendlyError } from '@/lib/ui/errors';
 import { recordSend } from '@/lib/history/store';
@@ -125,106 +125,19 @@ export const SendModal = memo(function SendModal({
     warmed.current = true;
     setWarming(true);
     void (async () => {
-      try {
-        const [{ primePresignPool }, { chainCrypto, getIkaClient }, { prewarmZkLoginProof }] =
-          await Promise.all([
-            import('@/lib/ika/presignPool'),
-            import('@/lib/ika/ikaClient'),
-            import('@/lib/zklogin/execute'),
-          ]);
+      /**
+       * Load the address validator's crypto library now.
+       *
+       * The first call to `validateAddress` dynamically imports ethers, @solana/web3.js or
+       * @scure/btc-signer depending on the chain, and that import landed on the user's first keystroke
+       * — a visible hitch at the worst moment. Doing it on open means the field validates instantly
+       * from the first character. Specific to this dialog, so it stays here.
+       */
+      void validateAddress(chain, '0x0000000000000000000000000000000000000000').catch(() => {});
 
-        // The Groth16 proof is session-scoped and transaction-independent, so minting it now takes
-        // another ~2-4s off the first send. Independent of the presignature, so run it alongside.
-        void prewarmZkLoginProof();
-
-        /**
-         * Load the address validator's crypto library now.
-         *
-         * The first call to `validateAddress` dynamically imports ethers, @solana/web3.js or
-         * @scure/btc-signer depending on the chain, and that import landed on the user's first keystroke
-         * — a visible hitch at the worst moment. Doing it on open means the field validates instantly
-         * from the first character.
-         */
-        void validateAddress(chain, '0x0000000000000000000000000000000000000000').catch(() => {});
-
-        const { curve, signatureAlgorithm } = chainCrypto(chain);
-        const ika = await getIkaClient(suiClient);
-        const dWallet = (await ika.getDWallet(dwalletId)) as {
-          dwallet_network_encryption_key_id?: string;
-        };
-        const keyId = dWallet.dwallet_network_encryption_key_id;
-        if (!keyId) return;
-
-        /**
-         * Decrypt the key share now, alongside buying the presignature.
-         *
-         * This was the largest single cost in a send (~19s measured) and, like the presignature, it does not
-         * depend on the recipient or the amount. Runs concurrently and independently: if it fails, the send
-         * simply decrypts inline as before.
-         */
-        void decryptShareAhead(curve);
-
-        await primePresignPool({
-          suiClient,
-          owner: zkAddress,
-          curve,
-          signatureAlgorithm,
-          dwalletNetworkEncryptionKeyId: keyId,
-          dWallet,
-          signAndExecuteAsync: (p) => zkLoginSignAndExecute(suiClient, zkAddress, p),
-        });
-      } catch (e) {
-        // Non-fatal: the send path buys its own presignature if the pool is empty.
-        console.warn('[presign] pool priming skipped:', e instanceof Error ? e.message : e);
-      } finally {
-        setWarming(false);
-      }
+      await warmSendPath({ suiClient, zkAddress, dwalletId, chain });
+      setWarming(false);
     })();
-  };
-
-  /**
-   * Decrypt this dWallet's key share ahead of the send.
-   *
-   * Needs the same three inputs the signing path uses — the dWallet, its encrypted share, and the user's
-   * share-encryption keys — so it reuses the cached metadata rather than re-deriving any of it.
-   */
-  const decryptShareAhead = async (curve: Curve) => {
-    try {
-      const [{ getDWalletMeta }, { prepareUserShare }, { generateEncryptionKeys, generateDeterministicEncryptionSeed }, { getIkaClient }] =
-        await Promise.all([
-          import('@/lib/dwallet/dwalletMeta'),
-          import('@/lib/ika/userShare'),
-          import('@/lib/dwallet/core/encryption'),
-          import('@/lib/ika/ikaClient'),
-        ]);
-
-      const ika = await getIkaClient(suiClient);
-      const meta = await getDWalletMeta({ suiClient, dwalletId, chain, curve });
-      if (!meta.encryptedShareId) return; // shared or imported-key dWallet: nothing to decrypt
-
-      const [dWallet, encryptedShare, keys] = await Promise.all([
-        ika.getDWallet(dwalletId),
-        ika.getEncryptedUserSecretKeyShare(meta.encryptedShareId),
-        generateEncryptionKeys(
-          generateDeterministicEncryptionSeed(zkAddress, curve),
-          curve,
-          zkAddress
-        ),
-      ]);
-
-      await prepareUserShare({
-        suiClient,
-        dwalletId,
-        shareId: meta.encryptedShareId,
-        curve,
-        dWallet,
-        encryptedShare,
-        userShareEncryptionKeys: keys as never,
-      });
-    } catch (e) {
-      // Non-fatal: the send path decrypts inline if this hasn't finished.
-      console.warn('[share] pre-decryption skipped:', e instanceof Error ? e.message : e);
-    }
   };
 
   /**
