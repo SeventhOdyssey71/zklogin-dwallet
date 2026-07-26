@@ -18,6 +18,7 @@ import { toast } from 'sonner';
 import { Check } from 'lucide-react';
 import { Button, CopyField, ErrorNote, Skeleton } from '@/components/ui';
 import { friendlyError, type FriendlyError } from '@/lib/ui/errors';
+import { MoveSolToSui } from '@/components/MoveSolToSui';
 import { recordSend } from '@/lib/history/store';
 import { zkLoginSignAndExecute } from '@/lib/zklogin/execute';
 import { suiTxUrl, suiObjectUrl, IKA_ACQUIRE_URL } from '@/lib/config/network';
@@ -36,7 +37,19 @@ import type { AppSuiClient } from '@/lib/sui/client';
 const SUI_LOGO = 'https://cryptologos.cc/logos/sui-sui-logo.png';
 const IKA_LOGO = 'https://coin-images.coingecko.com/coins/images/67598/large/ika.jpg?1753770879';
 
-export function SuiWalletView({ address }: { address: string }) {
+export function SuiWalletView({
+  address,
+  solana,
+}: {
+  address: string;
+  /**
+   * The Solana dWallet, when the account has one.
+   *
+   * Optional because this page must still work before any dWallet exists — the SUI/IKA balances and the
+   * withdraw form are useful on their own, and the move-in panel simply does not appear.
+   */
+  solana?: { address: string; balance: string | null; dwalletId: string; dwalletCapId: string };
+}) {
   const suiClient = useSuiClient() as AppSuiClient;
 
   const [assets, setAssets] = useState<SuiAsset[]>([]);
@@ -181,6 +194,18 @@ export function SuiWalletView({ address }: { address: string }) {
           </a>
         </div>
       </div>
+
+      {/* Topping up from Solana sits next to the balances that run out, which is where someone will look. */}
+      {solana && (
+        <MoveSolToSui
+          solanaAddress={solana.address}
+          suiAddress={address}
+          solBalance={solana.balance}
+          dwalletId={solana.dwalletId}
+          dwalletCapId={solana.dwalletCapId}
+          onArrived={() => void load()}
+        />
+      )}
 
       {/* Balances — also the asset selector for the send form */}
       <div className="grid sm:grid-cols-2 gap-3">

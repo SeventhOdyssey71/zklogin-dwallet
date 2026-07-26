@@ -135,6 +135,32 @@ export function AppShell({ initiallySignedIn }: { initiallySignedIn: boolean }) 
   const [tab, setTab] = useTabFromHash();
 
   /**
+   * The Solana dWallet, discovered once and shared.
+   *
+   * The Sui wallet page needs it to offer moving SOL in, but discovery (listing dWallets, deriving addresses)
+   * belongs to the dashboard. Holding it here means the Sui page does not repeat that work, and the panel
+   * simply does not render until it is known.
+   */
+  const [solanaSource, setSolanaSource] = useState<
+    { address: string; balance: string | null; dwalletId: string; dwalletCapId: string } | undefined
+  >(undefined);
+
+  /**
+   * Stable, and it reads the live SOL balance from the shared store at call time.
+   *
+   * The balance is not threaded through as a prop because it changes on every poll; taking it from the store
+   * when the panel needs it avoids re-rendering the whole shell each time a balance moves.
+   */
+  const handleSolanaSource = useCallback(
+    (source: { address: string; dwalletId: string; dwalletCapId: string }) => {
+      setSolanaSource((prev) =>
+        prev?.address === source.address ? prev : { ...source, balance: null }
+      );
+    },
+    []
+  );
+
+  /**
    * Explain an automatic sign-out.
    *
    * Being returned to the homepage with no warning reads as a bug, so the expiry sets a one-shot flag
@@ -205,10 +231,13 @@ export function AppShell({ initiallySignedIn }: { initiallySignedIn: boolean }) 
                   account={account}
                   onCreate={() => setTab('create')}
                   onViewHistory={() => setTab('history')}
+                  onSolanaSource={handleSolanaSource}
                 />
               )}
               {view === 'history' && account && <HistoryView address={account.address} />}
-              {view === 'sui' && account && <SuiWalletView address={account.address} />}
+              {view === 'sui' && account && (
+                <SuiWalletView address={account.address} solana={solanaSource} />
+              )}
             </>
           )}
         </div>
@@ -354,10 +383,13 @@ function AllChainsView({
   account,
   onCreate,
   onViewHistory,
+  onSolanaSource,
 }: {
   account: ZkAccount;
   onCreate: () => void;
   onViewHistory: () => void;
+  /** Reports the Solana dWallet upward, so the Sui page can offer moving SOL in without re-discovering it. */
+  onSolanaSource: (source: { address: string; dwalletId: string; dwalletCapId: string }) => void;
 }) {
   const suiClient = useSuiClient();
   const [loading, setLoading] = useState(true);
@@ -440,6 +472,13 @@ function AllChainsView({
       }
       // Registering the targets is what starts polling; the store fetches them itself.
       setTargets(nextTargets.filter((t) => CHAIN_ORDER.includes(t.chain)));
+
+      // Hand the Solana account up; the Sui page uses it to offer moving SOL in.
+      const solana = addrMap.Solana;
+      const solanaSrc = srcMap.Solana;
+      if (solana && solanaSrc) {
+        onSolanaSource({ address: solana, dwalletId: solanaSrc.id, dwalletCapId: solanaSrc.capId });
+      }
       setLoading(false);
       prefetchSendModal();
     } catch (e) {
