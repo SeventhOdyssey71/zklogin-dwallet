@@ -20,6 +20,7 @@ import { validateAddress, type AddressCheck } from '@/lib/utils/validateAddress'
 import { friendlyError, type FriendlyError } from '@/lib/ui/errors';
 import { recordSend } from '@/lib/history/store';
 import { txUrl } from '@/lib/config/chainRegistry';
+import { NONCE_RENT_SOL } from '@/lib/ika/enableDurableNonce';
 import { Button, CopyField, ErrorNote, Modal, StatusNote } from '@/components/ui';
 
 interface SendModalProps {
@@ -66,6 +67,9 @@ export function SendModal({
   const [txHash, setTxHash] = useState<string | null>(null);
   const [warming, setWarming] = useState(false);
   const [check, setCheck] = useState<AddressCheck>({ valid: false });
+  /** null = unknown/not applicable, false = available to enable, true = already on. */
+  const [durable, setDurable] = useState<boolean | null>(null);
+  const [enabling, setEnabling] = useState(false);
   const warmed = useRef(false);
 
   const numericBalance = parseFloat(balance);
@@ -215,6 +219,55 @@ export function SendModal({
     } catch (e) {
       // Non-fatal: the send path decrypts inline if this hasn't finished.
       console.warn('[share] pre-decryption skipped:', e instanceof Error ? e.message : e);
+    }
+  };
+
+  /**
+   * Does this Solana account already sign transactions that cannot expire?
+   *
+   * Checked on open so the offer only appears when it is actionable, and never for chains it does not apply
+   * to. A failure leaves it null, which renders nothing — a diagnostic control must not become noise.
+   */
+  useEffect(() => {
+    // No synchronous setState here: the not-applicable case is handled by gating the render on `chain`
+    // below, so this effect only ever writes asynchronously once the answer is known.
+    if (!open || chain !== 'Solana' || !fromAddress) return;
+    let live = true;
+    void import('@/lib/ika/enableDurableNonce').then(({ durableNonceReady }) =>
+      durableNonceReady(fromAddress).then((ready) => {
+        if (live) setDurable(ready);
+      })
+    );
+    return () => {
+      live = false;
+    };
+  }, [open, chain, fromAddress]);
+
+  const handleEnableDurable = async () => {
+    setEnabling(true);
+    setError(null);
+    try {
+      const { enableDurableNonce } = await import('@/lib/ika/enableDurableNonce');
+      const result = await enableDurableNonce({
+        suiClient,
+        dwalletId,
+        dwalletCapId,
+        zkAddress,
+        solanaAddress: fromAddress,
+        signAndExecuteTransaction: (p) => zkLoginSignAndExecute(suiClient, zkAddress, p as never),
+        onProgress: setStatus,
+      });
+      setDurable(true);
+      toast.success(
+        result.status === 'already' ? 'Already set up' : 'Instant signing enabled',
+        { description: 'Solana sends no longer race a blockhash deadline.' }
+      );
+    } catch (e) {
+      console.error(e);
+      setError(friendlyError(e));
+    } finally {
+      setEnabling(false);
+      setStatus('');
     }
   };
 
@@ -433,6 +486,29 @@ export function SendModal({
               </p>
             )}
           </div>
+
+          {chain === 'Solana' && durable === false && !loading && (
+            <div className="rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--surface-2)] p-3 space-y-2">
+              <p className="text-xs text-[var(--muted)] leading-relaxed">
+                Solana transactions normally expire about a minute after they are built, and signing here
+                takes ~13s. A one-time setup removes that deadline entirely — the rent is{' '}
+                <b className="text-[var(--foreground)]">refundable</b>.
+              </p>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={handleEnableDurable}
+                loading={enabling}
+                className="w-full"
+              >
+                {enabling ? 'Setting up…' : `Enable instant signing (~${NONCE_RENT_SOL.toFixed(5)} SOL)`}
+              </Button>
+            </div>
+          )}
+
+          {chain === 'Solana' && durable === true && !loading && (
+            <p className="mono-label text-center">signatures cannot expire on this account</p>
+          )}
 
           {warming && !status && (
             <StatusNote>Banking a presignature so your send goes out instantly…</StatusNote>

@@ -152,12 +152,20 @@ export async function signWithDWallet(
       dWallet: dw,
     })
   ));
-  const unsignedP = timed(
-    '· build chain tx',
-    metaP.then((m) =>
-      buildUnsignedTransaction(params.chain, params.recipient, params.amount, m.address, m.publicKeyHex)
-    )
-  );
+  /**
+   * A caller-supplied transaction wins over deriving one.
+   *
+   * Used by operations that are not a transfer — durable-nonce setup, for example. Resolved immediately, so
+   * the prologue simply has one less thing to wait for.
+   */
+  const unsignedP = params.prebuilt
+    ? Promise.resolve(params.prebuilt)
+    : timed(
+        '· build chain tx',
+        metaP.then((m) =>
+          buildUnsignedTransaction(params.chain, params.recipient, params.amount, m.address, m.publicKeyHex)
+        )
+      );
   /**
    * Protocol public parameters, resolved here rather than left to `requestSign`.
    *
@@ -295,7 +303,8 @@ export async function signWithDWallet(
    * A durable nonce does not expire, so there is nothing to go stale and nothing to rebuild. Rebuilding
    * anyway would re-read the nonce and throw away a perfectly valid payload for no reason.
    */
-  const cannotExpire = Boolean((unsignedTx as { durableNonce?: string })?.durableNonce);
+  const cannotExpire =
+    Boolean((unsignedTx as { durableNonce?: string })?.durableNonce) || Boolean(params.prebuilt);
   if (!cannotExpire && presignElapsed > STALE_BUILD_MS) {
     const rebuilt = await T.step('rebuild tx (stale blockhash)', () =>
       buildUnsignedTransaction(params.chain, params.recipient, params.amount, fromAddress, publicKeyHex)

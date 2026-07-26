@@ -8,6 +8,11 @@ import type { AppSuiClient } from '@/lib/sui/client';
 /**
  * Parameters for signing a transaction with dWallet
  */
+export interface UnsignedTransaction {
+  messageBytes: Uint8Array;
+  unsignedTx: any;
+}
+
 export interface SignTransactionParams {
   dwalletId: string;
   dwalletCapId: string;
@@ -21,6 +26,16 @@ export interface SignTransactionParams {
   signAndExecuteTransaction: (params: any) => Promise<any>;
   /** Called as each phase begins, so the UI can show what is actually happening. */
   onProgress?: (message: string) => void;
+  /**
+   * A transaction the caller has already built, signed instead of deriving one from
+   * (chain, recipient, amount).
+   *
+   * Exists for operations that are not "send X to Y" — setting up a durable nonce account, for instance,
+   * which is a System Program call with no recipient or amount at all. Everything else about the pipeline
+   * (presignature, key share, MPC round, signature attachment) is identical, so this reuses it rather than
+   * duplicating a second signing path that would then drift.
+   */
+  prebuilt?: UnsignedTransaction;
 }
 
 /**
@@ -44,10 +59,6 @@ export interface SigningContext {
 /**
  * Unsigned transaction data ready for signing
  */
-export interface UnsignedTransaction {
-  messageBytes: Uint8Array;
-  unsignedTx: any;
-}
 
 /**
  * Chain-specific signer interface
