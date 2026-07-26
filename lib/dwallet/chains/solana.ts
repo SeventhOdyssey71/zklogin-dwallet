@@ -11,6 +11,7 @@ import {
 } from '@solana/web3.js';
 import { ChainSigner, UnsignedTransaction, SignedTransactionResult } from '../core/types';
 import { SOLANA_MAINNET } from '../../config/chains';
+import { readDurableNonce } from './solanaNonce';
 
 /**
  * Solana chain signer
@@ -55,21 +56,43 @@ export class SolanaSigner implements ChainSigner {
       console.warn(`📋 This is Solana mainnet — fund ${fromAddress} with real SOL.`);
     }
 
-    // Get recent blockhash - fetch as late as possible!
-    console.log('⏰ Fetching fresh blockhash NOW (maximum validity window)...');
-    const blockchashStartTime = Date.now();
-    const { blockhash, lastValidBlockHeight } = await this.connection.getLatestBlockhash('finalized');
-    console.log(`✅ Blockhash fetched in ${Date.now() - blockchashStartTime}ms`);
-    console.log(`📋 Blockhash: ${blockhash}`);
-    console.log(`📋 Valid until block height: ${lastValidBlockHeight}`);
-    console.log(`⏰ You have ~150 seconds before this blockhash expires`);
+    /**
+     * Prefer a durable nonce.
+     *
+     * With one, the transaction commits to a value that does not expire, so the ~13s signing round stops
+     * racing a ~60-90s blockhash window. Without one, fall back to a recent blockhash fetched as late as
+     * possible — the previous behaviour — so a wallet that has not set up a nonce account still works.
+     *
+     * `nonceInfo` on the constructor rather than adding `nonceAdvance` by hand: the runtime requires that
+     * instruction at index 0, and letting web3.js place it removes the chance of an ordering mistake that
+     * would make the transaction look like an ordinary one with an unknown blockhash.
+     */
+    const durable = await readDurableNonce(this.connection, fromPubkey);
 
-    // Create transaction
-    const transaction = new SolanaTransaction({
-      feePayer: fromPubkey,
-      blockhash,
-      lastValidBlockHeight,
-    });
+    let transaction: SolanaTransaction;
+    let blockhash: string;
+    let lastValidBlockHeight: number | undefined;
+
+    if (durable) {
+      console.log(`⏳ Using durable nonce ${durable.account.toBase58()} — this signature cannot expire`);
+      blockhash = durable.nonce;
+      transaction = new SolanaTransaction({
+        feePayer: fromPubkey,
+        nonceInfo: { nonce: durable.nonce, nonceInstruction: durable.advanceInstruction },
+      });
+    } else {
+      console.log('⏰ No durable nonce — fetching a fresh blockhash (expires in ~150s)…');
+      const started = Date.now();
+      const latest = await this.connection.getLatestBlockhash('finalized');
+      console.log(`✅ Blockhash fetched in ${Date.now() - started}ms`);
+      blockhash = latest.blockhash;
+      lastValidBlockHeight = latest.lastValidBlockHeight;
+      transaction = new SolanaTransaction({
+        feePayer: fromPubkey,
+        blockhash,
+        lastValidBlockHeight,
+      });
+    }
 
     // Add transfer instruction
     transaction.add(
@@ -91,6 +114,8 @@ export class SolanaSigner implements ChainSigner {
         transaction,
         blockhash,
         lastValidBlockHeight,
+        // Lets the broadcaster skip the expiry-retry dance when the signature cannot expire.
+        durableNonce: durable?.account.toBase58(),
       },
     };
   }

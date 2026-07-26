@@ -291,7 +291,12 @@ export async function signWithDWallet(
    */
   const STALE_BUILD_MS = 5_000;
   const presignElapsed = performance.now() - presignWait;
-  if (presignElapsed > STALE_BUILD_MS) {
+  /**
+   * A durable nonce does not expire, so there is nothing to go stale and nothing to rebuild. Rebuilding
+   * anyway would re-read the nonce and throw away a perfectly valid payload for no reason.
+   */
+  const cannotExpire = Boolean((unsignedTx as { durableNonce?: string })?.durableNonce);
+  if (!cannotExpire && presignElapsed > STALE_BUILD_MS) {
     const rebuilt = await T.step('rebuild tx (stale blockhash)', () =>
       buildUnsignedTransaction(params.chain, params.recipient, params.amount, fromAddress, publicKeyHex)
     );
