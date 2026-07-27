@@ -9,11 +9,31 @@
  *
  * Deliberately NOT part of the multi-chain balance store: those are dWallet balances on other chains,
  * whereas these belong to the zkLogin account itself and are read straight from Sui.
+ *
+ * A REFRESH REACHES EVERY COPY
+ * ---------------------------
+ * The navbar and the shell each call this, so each held its own state and its own refresh — which meant
+ * a swap that credited SUI could refresh the balance on the page while the navbar went on showing the
+ * old one until something else happened to reload it. The two numbers are the same fact about the same
+ * account, so a refresh is broadcast to every mounted instance rather than kept private to one.
  */
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useSuiClient } from '@mysten/dapp-kit';
 import { IKA_COIN_TYPE } from '@/lib/config/network';
+
+/** Every mounted instance's tick setter, so one refresh moves them all. */
+const listeners = new Set<() => void>();
+
+/**
+ * Refetch SUI and IKA everywhere they are shown.
+ *
+ * Exported so code with no hook of its own — the swap flow settling, a completed send — can say "these
+ * numbers just changed" without needing a reference to a particular component's refresh.
+ */
+export function refreshGasBalances(): void {
+  for (const bump of listeners) bump();
+}
 
 function fmt(raw: string, decimals: number): string {
   const n = Number(raw) / 10 ** decimals;
@@ -27,6 +47,20 @@ export function useGasBalances(address: string | undefined) {
   const [ika, setIka] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [tick, setTick] = useState(0);
+
+  /**
+   * Subscribe this instance to broadcast refreshes.
+   *
+   * Registered in an effect rather than at render time so a discarded render never leaves a listener
+   * behind, and removed on unmount so a stale setter cannot be called after the component is gone.
+   */
+  useEffect(() => {
+    const bump = () => setTick((t) => t + 1);
+    listeners.add(bump);
+    return () => {
+      listeners.delete(bump);
+    };
+  }, []);
 
   useEffect(() => {
     if (!address) return;
@@ -54,6 +88,9 @@ export function useGasBalances(address: string | undefined) {
     };
   }, [suiClient, address, tick]);
 
-  return { sui, ika, loading, refresh: () => setTick((t) => t + 1) };
+  /** Stable, and broadcast: refreshing here refreshes the navbar's copy too. */
+  const refresh = useCallback(() => refreshGasBalances(), []);
+
+  return { sui, ika, loading, refresh };
 }
 

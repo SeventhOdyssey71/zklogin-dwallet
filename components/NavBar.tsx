@@ -65,11 +65,24 @@ export function NavBar({
   tab,
   setTab,
   address,
+  hasWallets = false,
 }: {
   tab: NavTab;
   setTab: (t: NavTab) => void;
   address?: string;
+  /** True once this account has created its wallets, which retires the "Create" tab. */
+  hasWallets?: boolean;
 }) {
+  /**
+   * Setup is a step, not a destination.
+   *
+   * Once the wallets exist, "Create" can only lead to a screen that refuses to do anything — the
+   * on-chain check allows one dWallet per curve — so leaving it in the navigation offers the user a dead
+   * end and pushes the things they actually use further along the row. It stays while the tab is the
+   * current view, so navigating there from the dashboard button does not make the row jump.
+   */
+  const tabs = hasWallets && tab !== 'create' ? TABS.filter((t) => t.key !== 'create') : TABS;
+
   const [open, setOpen] = useState(false);
   const { sui, ika, loading, refresh } = useGasBalances(address);
 
@@ -115,7 +128,7 @@ export function NavBar({
         {/* Desktop: everything on one row. */}
         {address && (
           <nav aria-label="Views" className="hidden lg:flex items-center gap-1 text-sm">
-            {TABS.map((t) => (
+            {tabs.map((t) => (
               <button
                 key={t.key}
                 onClick={() => go(t.key)}
@@ -167,7 +180,7 @@ export function NavBar({
       {address && open && (
         <div className="lg:hidden border-t border-[var(--border)]/60 px-4 sm:px-6 py-3 space-y-3">
           <nav aria-label="Views" className="grid grid-cols-2 gap-1.5 text-sm">
-            {TABS.map((t) => (
+            {tabs.map((t) => (
               <button
                 key={t.key}
                 onClick={() => go(t.key)}

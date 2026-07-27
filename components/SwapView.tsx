@@ -38,6 +38,7 @@ import { prewarmZkLoginProof, zkLoginSignAndExecute } from '@/lib/zklogin/execut
 import { warmSendPath } from '@/lib/ika/warmSendPath';
 import { Timings } from '@/lib/dwallet/core/timings';
 import { peek as peekBalance, subscribe as subscribeBalances } from '@/lib/balances/store';
+import { refreshGasBalances } from '@/lib/sui/useGasBalances';
 import { txUrl } from '@/lib/config/chainRegistry';
 import {
   SUI_COIN_TYPE,
@@ -117,6 +118,18 @@ const ROUTES: Record<
     toSymbol: string;
     /** What signs the deposit, in the user's words. */
     signerLabel: string;
+    /**
+     * Expected wall-clock for the whole swap, in seconds.
+     *
+     * NOT the service's `timeEstimate`, which covers only solver settlement — 22s one way, 35s the other
+     * — and so understated the wait by the entire time it takes us to sign and broadcast the deposit.
+     * Quoting it as the expected time meant the clock passed "expected" while the swap was still
+     * perfectly healthy, which reads as a stall.
+     *
+     * These come from measured end-to-end runs (40s sending SUI, 67s sending SOL), rounded up: a number
+     * a swap usually beats is reassuring, and one it usually misses is not.
+     */
+    expectedSeconds: number;
     fromLabel: string;
     toLabel: string;
   }
@@ -129,6 +142,8 @@ const ROUTES: Record<
     fromSymbol: 'SOL',
     toSymbol: 'SUI',
     signerLabel: 'Your Solana wallet signs the transfer',
+    // Slower because a Solana deposit needs a dWallet signature: presignature, wasm, MPC round.
+    expectedSeconds: 70,
     fromLabel: 'your Solana wallet',
     toLabel: 'your Sui wallet',
   },
@@ -140,6 +155,8 @@ const ROUTES: Record<
     fromSymbol: 'SUI',
     toSymbol: 'SOL',
     signerLabel: 'Your Sui wallet signs the transfer',
+    // Faster: the deposit leaves the zkLogin account, signed with the ephemeral key. No dWallet, no MPC.
+    expectedSeconds: 50,
     fromLabel: 'your Sui wallet',
     toLabel: 'your Solana wallet',
   },
@@ -451,12 +468,30 @@ export const SwapView = memo(function SwapView({
 
         if (result.status === 'SUCCESS') {
           setPhase('done');
-          toast.success('SUI arrived', { description: 'Your Sui wallet has been credited.' });
+          toast.success(`${route.toSymbol} arrived`, {
+            description: `${route.toLabel} has been credited.`,
+          });
+          /**
+           * Refresh what the user can actually see, on both sides of the swap.
+           *
+           * A credit changes two balances — the origin went down when the deposit was signed, the
+           * destination just went up — and they are shown in three places: this page, the dashboard, and
+           * the navbar's SUI/IKA strip. Announcing "arrived" over stale numbers is the one moment the
+           * wallet looks wrong when it is not.
+           */
+          refreshGasBalances();
+          void import('@/lib/balances/store').then((m) => {
+            m.refreshSoon(route.fromChain);
+            m.refreshSoon(route.toChain);
+          });
           onArrived?.();
           return;
         }
         if (result.status === 'REFUNDED' || result.status === 'FAILED') {
           setPhase('done');
+          // A refund moves money too — the origin balance goes back up.
+          refreshGasBalances();
+          void import('@/lib/balances/store').then((m) => m.refreshSoon(route.fromChain));
           return;
         }
         if (Date.now() > until) break;
@@ -467,7 +502,8 @@ export const SwapView = memo(function SwapView({
           'either complete the swap or refund automatically.'
       );
     },
-    [onArrived]
+    // `route` is a stable module constant per direction, so this identity only changes when it should.
+    [onArrived, route]
   );
 
   /**
@@ -757,7 +793,7 @@ export const SwapView = memo(function SwapView({
                 value={`≈ ${fmtAmount(preview.amountOutFormatted)} ${route.toSymbol}`}
                 strong
               />
-              <Row label="Estimated time" value={`~${preview.timeEstimate ?? 35}s`} />
+              <Row label="Estimated time" value={`~${route.expectedSeconds}s`} />
             </div>
           )}
 
@@ -792,7 +828,7 @@ export const SwapView = memo(function SwapView({
               }
             />
             <Row label="Max slippage" value={`${SLIPPAGE_BPS / 100}%`} />
-            <Row label="Estimated time" value={`~${preview?.timeEstimate ?? 35}s`} />
+            <Row label="Estimated time" value={`~${route.expectedSeconds}s`} />
             {/* Named, not implied: this is the promise that makes the risk above acceptable. */}
             <Row label="Refunds to" value={truncate(fromAddress, 6, 6)} />
           </div>
@@ -828,7 +864,7 @@ export const SwapView = memo(function SwapView({
             <span className="mono-label">Elapsed</span>
             <span className="text-sm">
               {startedAt !== null && <Elapsed since={startedAt} />}
-              <span className="mono-label ml-2">of ~{preview?.timeEstimate ?? 35}s expected</span>
+              <span className="mono-label ml-2">of ~{route.expectedSeconds}s expected</span>
             </span>
           </div>
           <ol className="space-y-2.5">

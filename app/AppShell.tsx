@@ -6,6 +6,7 @@ import { toast } from 'sonner';
 import { Loader2 } from 'lucide-react';
 import dynamic from 'next/dynamic';
 import { NavBar, type NavTab } from '@/components/NavBar';
+import { anyRememberedAddress, knownToHaveWallets, rememberHasWallets } from '@/lib/dwallet/walletsExist';
 import { useZkLogin, consumeExpiredNotice } from '@/lib/useZkLogin';
 import { zkLoginSignAndExecute } from '@/lib/zklogin/execute';
 // Types are erased at build time, so importing them costs nothing. `createBothDWallets` is loaded on
@@ -115,6 +116,20 @@ function useTabFromHash(): [NavTab, (t: NavTab) => void] {
     const read = () => {
       const fromHash = window.location.hash.replace('#', '') as NavTab;
       if (TAB_KEYS.includes(fromHash)) setTab(fromHash);
+      /**
+       * No hash, and the wallets already exist? Then setup is not where this user belongs.
+       *
+       * The initial tab has to be 'create' — a brand-new account has nothing else to show, and the
+       * server cannot read the cached answer, so anything else would render differently on hydration.
+       * But a returning user was then landed on the funding screen every time, which is why removing
+       * "Create" from the navigation was not enough on its own: the app was still opening on it.
+       */
+      /**
+       * `anyRememberedAddress` rather than the signed-in one: this runs before the session resolves, so
+       * the address is not known yet. "Has anyone finished setup in this browser" is enough to decide an
+       * opening tab, and sign-out clears the store so it cannot outlive an account.
+       */
+      else if (!window.location.hash && knownToHaveWallets(anyRememberedAddress())) setTab('all');
     };
     read();
     window.addEventListener('hashchange', read);
@@ -174,6 +189,31 @@ export function AppShell({ initiallySignedIn }: { initiallySignedIn: boolean }) 
   );
 
   /**
+   * Whether "Create" still belongs in the navigation.
+   *
+   * Seeded from the cached answer so the tab does not appear and then vanish on every load, and
+   * confirmed by discovery. The dashboard's own "Set up my wallets" button still reaches the flow, so
+   * hiding the tab removes a finished step rather than a capability.
+   */
+  const [hasWallets, setHasWallets] = useState(false);
+  useEffect(() => {
+    const address = account?.address;
+    /**
+     * `false` until an effect says otherwise, deliberately.
+     *
+     * The cached answer lives in localStorage, which the server cannot read — seeding it in the state
+     * initialiser would make the server and the browser render different navigation and throw the tree
+     * away on hydration. So the first paint shows "Create" and this corrects it, and the correction is
+     * scheduled rather than synchronous so it does not cascade a second render of the whole shell.
+     */
+    const known = knownToHaveWallets(address) || Boolean(solanaSource);
+    if (solanaSource && address) rememberHasWallets(address);
+    if (known === hasWallets) return;
+    const t = setTimeout(() => setHasWallets(known), 0);
+    return () => clearTimeout(t);
+  }, [account?.address, solanaSource, hasWallets]);
+
+  /**
    * Explain an automatic sign-out.
    *
    * Being returned to the homepage with no warning reads as a bug, so the expiry sets a one-shot flag
@@ -216,7 +256,7 @@ export function AppShell({ initiallySignedIn }: { initiallySignedIn: boolean }) 
 
   return (
     <main className="relative z-10 min-h-screen flex flex-col">
-      <NavBar tab={view} setTab={setTab} address={account?.address} />
+      <NavBar tab={view} setTab={setTab} address={account?.address} hasWallets={hasWallets} />
 
       {/* Content is centred in whatever space the navbar and footer leave, so a short page like
           Create sits in the middle of the viewport rather than hugging the top. */}

@@ -21,6 +21,8 @@ import { clearBalances } from "@/lib/balances/store";
 import { clearUserShares } from "@/lib/ika/userShare";
 import { clearHistory } from "@/lib/history/store";
 import { clearSigningWarmup } from "@/lib/ika/warmSigning";
+import { clearZkLoginProofWarmup } from "@/lib/zklogin/execute";
+import { clearWalletsExist } from "@/lib/dwallet/walletsExist";
 
 export interface ZkUser {
   address: string;
@@ -122,6 +124,10 @@ function useZkLoginState(initiallySignedIn: boolean) {
     // History is per account and sits in localStorage, so it would otherwise greet the next user.
     clearHistory();
     clearSigningWarmup();
+    // The proof is derived from this session's ephemeral key; it must not survive into the next.
+    clearZkLoginProofWarmup();
+    // Nor must a claim about which wallets exist outlive the account that owned it.
+    clearWalletsExist();
     await fetch("/api/zklogin/logout", { method: "POST" }).catch(() => {});
     setUser(null);
 
