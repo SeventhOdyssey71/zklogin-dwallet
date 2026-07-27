@@ -1,7 +1,7 @@
 'use client';
 
 /**
- * Move SOL from the dWallet's Solana account into the zkLogin Sui account.
+ * Swap between the dWallet's Solana account and the zkLogin Sui account, in either direction.
  *
  * WHY THIS IS A PAGE AND NOT A PANEL
  * ----------------------------------
@@ -16,19 +16,16 @@
  *
  * WHY THERE ARE NO ADDRESS FIELDS
  * -------------------------------
- * Both ends are already known and neither should be typed: the source and the refund address are the
- * dWallet's Solana account, and the destination is this zkLogin Sui address. A mistyped address here would
- * send funds to a stranger, so the safest input is no input.
+ * Both ends are already known and neither should be typed: the two accounts are this wallet's own, and
+ * the refund always goes back to whichever one is paying. A mistyped address here would send funds to a
+ * stranger, so the safest input is no input.
  *
- * `refundTo` is deliberately the sending account. If the swap does not fill, the refund lands back where it
- * came from and costs no further signature.
- *
- * WHY IT REUSES THE EXISTING SEND PATH
- * ------------------------------------
- * A deposit is an ordinary SOL transfer to an address the service hands us, so this calls `signWithDWallet`
- * exactly as the send dialog does — same presignature pool, same pre-decrypted key share, same durable
- * nonce. No new signing code exists for this feature at all, which is the whole reason it was worth
- * choosing over a bridge integration.
+ * WHY IT REUSES THE EXISTING SEND PATHS
+ * -------------------------------------
+ * A deposit is an ordinary transfer to an address the service hands us, so each direction calls the code
+ * that already exists for it — `signWithDWallet` for Solana, `zkLoginSignAndExecute` for Sui. No signing
+ * code was written for this feature at all, which is the whole reason it was worth choosing over a bridge
+ * integration. See `ROUTES` for why that makes the two directions cost wildly different amounts.
  */
 
 import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
@@ -37,8 +34,9 @@ import { useSuiClient } from '@mysten/dapp-kit';
 import { toast } from 'sonner';
 import { Button, CopyField, ErrorNote, Skeleton, Stepper, truncate } from '@/components/ui';
 import { friendlyError, type FriendlyError } from '@/lib/ui/errors';
-import { zkLoginSignAndExecute } from '@/lib/zklogin/execute';
+import { prewarmZkLoginProof, zkLoginSignAndExecute } from '@/lib/zklogin/execute';
 import { warmSendPath } from '@/lib/ika/warmSendPath';
+import { Timings } from '@/lib/dwallet/core/timings';
 import { peek as peekBalance, subscribe as subscribeBalances } from '@/lib/balances/store';
 import { txUrl } from '@/lib/config/chainRegistry';
 import {
@@ -62,8 +60,19 @@ import {
 /** Slippage the committed quote is allowed to move within. 50bps, tighter than the 100 the service defaults to. */
 const SLIPPAGE_BPS = 50;
 
-/** How often to ask where the swap has got to. Settlement measured ~35s, so this is not a tight loop. */
-const POLL_MS = 5_000;
+/**
+ * How often to ask where the swap has got to.
+ *
+ * The first version slept 5s BEFORE its first question and then asked every 5s, so a swap that settled
+ * in 22s was reported somewhere between 25s and 30s — up to 8s of the wait was our own polling rather
+ * than the network. Asking immediately, and quickly while settlement is plausible, removes that without
+ * turning a ten-minute watch into thousands of requests.
+ */
+const POLL_FAST_MS = 1_500;
+const POLL_SLOW_MS = 5_000;
+
+/** How long to keep asking quickly. Settlement measured 22–35s, so this covers the expected window. */
+const POLL_FAST_WINDOW_MS = 60_000;
 
 /** Give up polling after this. The swap continues regardless; only our watching stops. */
 const POLL_TIMEOUT_MS = 10 * 60 * 1000;
@@ -277,13 +286,27 @@ export const SwapView = memo(function SwapView({
    */
   const warmed = useRef(false);
   useEffect(() => {
-    // Only the Solana leg needs any of this. A Sui deposit is signed with the ephemeral key already in
-    // memory — there is no presignature to bank and no key share to decrypt.
-    if (!sendingSol) return;
     if (phase !== 'amount' && phase !== 'review') return;
     if (phase === 'amount' && warmed.current) return;
     warmed.current = true;
-    void warmSendPath({ suiClient, zkAddress: suiAddress, dwalletId, chain: 'Solana' });
+
+    /**
+     * BOTH directions need the Groth16 proof.
+     *
+     * This was wrong until a measured run showed it. A Sui deposit needs no dWallet and no MPC, so
+     * warming was skipped for that direction entirely — but the transfer is still submitted through
+     * `zkLoginSignAndExecute`, which mints the proof. Skipping the warm-up put ~2-4s back onto the
+     * critical path of the direction that was supposed to be the fast one.
+     */
+    void prewarmZkLoginProof();
+
+    /**
+     * Only the Solana deposit needs a dWallet signature — presignature, key share, wasm, MPC round.
+     * A Sui deposit is signed with the ephemeral key already in memory.
+     */
+    if (sendingSol) {
+      void warmSendPath({ suiClient, zkAddress: suiAddress, dwalletId, chain: 'Solana' });
+    }
   }, [sendingSol, phase, suiClient, suiAddress, dwalletId]);
 
   const requested = parseFloat(amount) || 0;
@@ -406,9 +429,16 @@ export const SwapView = memo(function SwapView({
 
   const watch = useCallback(
     async (depositAddress: string) => {
-      const until = Date.now() + POLL_TIMEOUT_MS;
+      const startedWatching = Date.now();
+      const until = startedWatching + POLL_TIMEOUT_MS;
+      let first = true;
       for (;;) {
-        await new Promise((r) => setTimeout(r, POLL_MS));
+        // Ask straight away the first time: the deposit is already broadcast and may already be filled.
+        if (!first) {
+          const fast = Date.now() - startedWatching < POLL_FAST_WINDOW_MS;
+          await new Promise((r) => setTimeout(r, fast ? POLL_FAST_MS : POLL_SLOW_MS));
+        }
+        first = false;
         let result: Awaited<ReturnType<typeof intentStatus>>;
         try {
           result = await intentStatus(depositAddress);
@@ -452,26 +482,35 @@ export const SwapView = memo(function SwapView({
     setStartedAt(Date.now());
     setPhase('committing');
     setStatusLine('Locking the rate…');
+    /**
+     * Time the swap the way the send path is timed.
+     *
+     * "40 seconds one way, 67 the other" is not a debuggable report — it cannot separate our own latency
+     * from the solver network's, and the first real runs of this flow could only be guessed at. The send
+     * path already learned this; the swap shipped without it.
+     */
+    const T = new Timings(`Swap ${route.fromSymbol} → ${route.toSymbol}`);
     try {
-      const [from, to] = await Promise.all([
-        findAsset(...route.origin),
-        findAsset(...route.destination),
-      ]);
+      const [from, to] = await T.step('asset lookup', () =>
+        Promise.all([findAsset(...route.origin), findAsset(...route.destination)])
+      );
       if (!from || !to) {
         throw new Error(
           `The intents service does not currently list ${route.fromSymbol} → ${route.toSymbol}.`
         );
       }
 
-      const live = await quote({
-        originAsset: from.assetId,
-        destinationAsset: to.assetId,
-        amount: String(Math.floor(requested * 10 ** from.decimals)),
-        refundTo: fromAddress,
-        recipient: toAddress,
-        slippageBps: SLIPPAGE_BPS,
-        dry: false,
-      });
+      const live = await T.step('commit quote', () =>
+        quote({
+          originAsset: from.assetId,
+          destinationAsset: to.assetId,
+          amount: String(Math.floor(requested * 10 ** from.decimals)),
+          refundTo: fromAddress,
+          recipient: toAddress,
+          slippageBps: SLIPPAGE_BPS,
+          dry: false,
+        })
+      );
       if (!live.depositAddress) {
         throw new Error('The intents service did not return a deposit address.');
       }
@@ -494,21 +533,26 @@ export const SwapView = memo(function SwapView({
         const { signWithDWallet, broadcastTransaction } = await import(
           '@/lib/dwallet/clientSideSigning'
         );
-        const signed = await signWithDWallet({
-          dwalletId,
-          dwalletCapId,
-          encryptedShareId: '',
-          chain: 'Solana',
-          recipient: live.depositAddress,
-          amount: depositAmount,
-          suiClient,
-          userAccount: { address: suiAddress },
-          signAndExecuteTransaction: (p: { transaction: unknown }) =>
-            zkLoginSignAndExecute(suiClient, suiAddress, p as never),
-          onProgress: setStatusLine,
-        });
+        const signed = await T.step('sign deposit (dWallet + MPC)', () =>
+          signWithDWallet({
+            dwalletId,
+            dwalletCapId,
+            encryptedShareId: '',
+            chain: 'Solana',
+            recipient: live.depositAddress!,
+            amount: depositAmount,
+            suiClient,
+            userAccount: { address: suiAddress },
+            signAndExecuteTransaction: (p: { transaction: unknown }) =>
+              zkLoginSignAndExecute(suiClient, suiAddress, p as never),
+            onProgress: setStatusLine,
+          })
+        );
         hash = signed.serialized
-          ? (await broadcastTransaction('Solana', signed.serialized)).txHash
+          ? await T.step(
+              'broadcast',
+              async () => (await broadcastTransaction('Solana', signed.serialized!)).txHash
+            )
           : signed.txHash || signed.hash;
       } else {
         /**
@@ -526,7 +570,9 @@ export const SwapView = memo(function SwapView({
           recipient: live.depositAddress,
           sender: suiAddress,
         });
-        const { digest } = await zkLoginSignAndExecute(suiClient, suiAddress, { transaction: tx });
+        const { digest } = await T.step('sign deposit (zkLogin)', () =>
+          zkLoginSignAndExecute(suiClient, suiAddress, { transaction: tx })
+        );
         hash = digest;
       }
 
@@ -538,8 +584,11 @@ export const SwapView = memo(function SwapView({
       setPhase('watching');
       setStatus('PENDING_DEPOSIT');
       setStatusLine('Deposit sent. Solvers are filling it…');
-      await watch(live.depositAddress);
+      await T.step('solver settlement', () => watch(live.depositAddress!));
+      T.report();
     } catch (e) {
+      // Report on the way out too: a slow failure is exactly the case worth seeing a breakdown for.
+      T.report();
       console.error(e);
       setError(friendlyError(e));
       // Back to review, not to the start: the amount is still what they wanted.

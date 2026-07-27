@@ -84,7 +84,30 @@ export async function zkLoginSignAndExecute(
  * minting it while the user is still on the wallet screen removes it from the first send entirely.
  * Fire-and-forget: a failure here just means the first transaction pays for it as before.
  */
-export async function prewarmZkLoginProof(): Promise<boolean> {
+let prewarming: Promise<boolean> | null = null;
+
+export function prewarmZkLoginProof(): Promise<boolean> {
+  /**
+   * One mint per session, however many callers ask.
+   *
+   * The proof depends only on the ephemeral session, so a second request can only ever return the same
+   * cached answer — but it is still a round-trip, and both the send dialog and the swap flow now ask for
+   * it. Sharing the promise also means a caller arriving mid-flight waits for the existing mint instead
+   * of starting a competing one.
+   */
+  prewarming ??= mintProof().catch((e) => {
+    prewarming = null; // never cache a failure; the next attempt should retry
+    throw e;
+  });
+  return prewarming.catch(() => false);
+}
+
+/** Drop the cached mint on sign-out, so the next user does not inherit it. */
+export function clearZkLoginProofWarmup(): void {
+  prewarming = null;
+}
+
+async function mintProof(): Promise<boolean> {
   const eph = loadEphemeral();
   if (!eph) return false;
   try {
