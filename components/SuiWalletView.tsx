@@ -20,6 +20,7 @@ import { Button, CopyField, ErrorNote, Skeleton } from '@/components/ui';
 import { friendlyError, type FriendlyError } from '@/lib/ui/errors';
 import { recordSend } from '@/lib/history/store';
 import { zkLoginSignAndExecute } from '@/lib/zklogin/execute';
+import { refreshGasBalances } from '@/lib/sui/useGasBalances';
 import { suiTxUrl, suiObjectUrl, IKA_ACQUIRE_URL } from '@/lib/config/network';
 import {
   fetchSuiWalletAssets,
@@ -149,6 +150,13 @@ export function SuiWalletView({
       // Balances settle a moment after execution.
       await suiClient.waitForTransaction({ digest }).catch(() => {});
       await load();
+      /**
+       * The navbar shows the same two numbers this page just changed.
+       *
+       * `load` only refreshes this component's copy, so sending SUI left the navbar strip advertising the
+       * pre-send balance until something else happened to reload it.
+       */
+      refreshGasBalances();
     } catch (e) {
       console.error(e);
       const friendly = friendlyError(e);

@@ -249,14 +249,21 @@ export async function refreshAll(options: { force?: boolean } = {}): Promise<voi
 }
 
 /**
- * Refresh one chain shortly after something changed it.
+ * Refresh one chain after something changed it — immediately, and again once it has settled.
  *
- * The delay exists because a node that has just accepted a transaction often serves the pre-transaction
- * balance for a moment; refetching instantly tends to return the old number and look broken.
+ * Two attempts, on purpose. A node that has just accepted a transaction often serves the
+ * pre-transaction balance for a moment, which is why the settled read exists and why this used to wait
+ * before asking at all. But that meant a send left the dashboard showing the old balance for two and a
+ * half seconds with nothing happening, which reads as the app having missed the transaction.
+ *
+ * So it asks straight away too. Many chains answer with the new balance immediately; the ones that do
+ * not simply return what is already on screen, so the early attempt can inform but never mislead. The
+ * settled read then guarantees the number is right regardless.
  */
 export function refreshSoon(chain: string): void {
   const found = [...targets.values()].find((t) => t.chain === chain);
   if (!found) return;
+  void read(found, { force: true }).catch(() => undefined);
   setTimeout(() => void read(found, { force: true }).catch(() => undefined), SETTLE_MS);
 }
 

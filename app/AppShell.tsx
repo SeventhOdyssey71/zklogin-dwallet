@@ -24,7 +24,7 @@ import { LandingPage } from '@/components/landing/LandingPage';
 import { Onboarding, type OnboardStage } from '@/components/onboarding/Onboarding';
 import { DashboardOverview } from '@/components/dashboard/DashboardOverview';
 import type { DashboardActivity, DashboardChain } from '@/components/dashboard/shared';
-import { useGasBalances } from '@/lib/sui/useGasBalances';
+import { refreshGasBalances, useGasBalances } from '@/lib/sui/useGasBalances';
 import { IKA_ACQUIRE_URL } from '@/lib/config/network';
 import { readHistory, subscribe as subscribeHistory } from '@/lib/history/store';
 import { Button, ErrorNote, truncate } from '@/components/ui';
@@ -704,7 +704,15 @@ function AllChainsView({
   const handleSent = useCallback(() => {
     const chain = sendChainRef.current;
     if (!chain) return;
+    /**
+     * A send moves more than the chain it was sent on.
+     *
+     * The asset left the sending chain, and paying for the signature spent SUI gas and IKA session fees
+     * from the zkLogin account — which the navbar and the Sui wallet page both display. Refreshing only
+     * the sending chain left those two showing what the user had before they paid.
+     */
     void import('@/lib/balances/store').then((m) => m.refreshSoon(chain));
+    refreshGasBalances();
   }, []);
 
   const onReceive = useCallback(
