@@ -140,7 +140,7 @@ export function ChainChipGroup({
  * simply the chains the wallet covers, so they read as one set rather than being split across three
  * boxes labelled with curve names.
  *
- * Chips are grouped into explicit rows (5 / 5 / 4 for 14 chains) rather than left to `flex-wrap`.
+ * Chips are grouped into explicit rows (5 / 4 / 4 for 13 chains) rather than left to `flex-wrap`.
  * Wrapping packs greedily, which put 12 on the first line and stranded 2 on a second — balanced rows
  * read as a deliberate grid instead. Each row still wraps internally, so on a phone the same markup
  * degrades to however many fit per line.
@@ -161,11 +161,11 @@ function chunkRows<T>(items: T[], sizes: number[]): T[][] {
 
 export function AllChainChips({
   assets,
-  rowSizes = [5, 5, 4],
+  rowSizes = [5, 4, 4],
   className = '',
 }: {
   assets: Record<string, ChainAsset>;
-  /** Chips per row, largest-first. Defaults to 5/5/4 for the current 14 chains. */
+  /** Chips per row, largest-first. Defaults to the current 13 chains. */
   rowSizes?: number[];
   className?: string;
 }) {

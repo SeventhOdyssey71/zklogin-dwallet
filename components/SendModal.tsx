@@ -233,7 +233,7 @@ export const SendModal = memo(function SendModal({
     }
 
     setLoading(true);
-    setStatus('Signing with your dWallet (2PC-MPC v4)…');
+    setStatus('Signing with your wallet…');
     try {
       const signed = await signWithDWallet({
         dwalletId,

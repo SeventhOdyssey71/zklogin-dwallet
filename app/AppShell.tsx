@@ -72,11 +72,11 @@ const CHAIN_SYMBOLS: Record<string, string> = Object.fromEntries(
 );
 
 const STEPS: { key: CreateStep; label: string }[] = [
-  { key: 'init', label: 'Connect to Ika network' },
+  { key: 'init', label: 'Connect to the network' },
   { key: 'prepare', label: 'Prepare key generation' },
-  { key: 'request', label: 'Request dWallet (sign #1)' },
-  { key: 'awaiting-network', label: 'Network MPC key shares' },
-  { key: 'accept', label: 'Accept share (sign #2)' },
+  { key: 'request', label: 'Request your keys (approval 1 of 2)' },
+  { key: 'awaiting-network', label: 'Validators generate key shares' },
+  { key: 'accept', label: 'Accept your share (approval 2 of 2)' },
   { key: 'activating', label: 'Confirm activation' },
   { key: 'done', label: 'Active' },
 ];
@@ -264,7 +264,7 @@ export function AppShell({ initiallySignedIn }: { initiallySignedIn: boolean }) 
                   <div className="card p-6 text-center space-y-2">
                     <p className="text-sm">No Solana wallet yet.</p>
                     <p className="text-xs text-[var(--muted)]">
-                      Swapping moves value between your Solana dWallet and your Sui wallet, so create
+                      Swapping moves value between your Solana wallet and your Sui wallet, so create
                       your wallets first.
                     </p>
                     <Button variant="secondary" size="sm" onClick={() => setTab('create')}>
@@ -388,7 +388,7 @@ function CreateView({
       });
       setResult(created[0] ?? null);
       toast.success(
-        created.length > 1 ? `${created.length} dWallets are active` : 'dWallet is active',
+        created.length > 1 ? `${created.length} wallets are ready` : 'Your wallet is ready',
         { description: created.map((c) => c.curve).join(' + ') }
       );
     } catch (e) {
@@ -756,7 +756,7 @@ function AllChainsView({
       {!loading && !error && rows.length === 0 && (
         <div className="card p-8 text-center space-y-3 mb-4">
           <p className="text-sm text-[var(--muted)]">
-            No active dWallets on this account yet.
+            You haven&apos;t set up your wallets yet.
           </p>
           <Button onClick={onCreate}>Set up my wallets</Button>
         </div>

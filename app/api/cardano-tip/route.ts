@@ -6,7 +6,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { CARDANO_MAINNET } from '@/lib/config/chains';
 
-export async function GET(_request: NextRequest) {
+export async function GET() {
   try {
     // Fetch current chain tip from Koios API
     const response = await fetch(

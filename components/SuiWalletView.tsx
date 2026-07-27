@@ -164,7 +164,7 @@ export function SuiWalletView({
       <div className="flex items-start justify-between gap-3">
         <div>
           <h1 className="text-2xl font-extrabold tracking-tight">My Sui Wallet</h1>
-          <div className="mono-label mt-1">zkLogin account · funds every dWallet operation</div>
+          <div className="mono-label mt-1">from your Google account · pays for every wallet action</div>
         </div>
         <Button
           variant="secondary"
@@ -254,7 +254,7 @@ export function SuiWalletView({
                 <div className="mono-label mt-2 text-[10px]">pays Sui gas</div>
               )}
               {a.type !== SUI_COIN_TYPE && (
-                <div className="mono-label mt-2 text-[10px]">pays MPC session fees</div>
+                <div className="mono-label mt-2 text-[10px]">pays signing fees</div>
               )}
             </button>
           );

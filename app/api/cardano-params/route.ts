@@ -6,7 +6,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { CARDANO_MAINNET } from '@/lib/config/chains';
 
-export async function GET(_request: NextRequest) {
+export async function GET() {
   try {
     // Fetch protocol parameters from Koios API (latest epoch)
     // Koios uses POST with empty body for latest epoch params

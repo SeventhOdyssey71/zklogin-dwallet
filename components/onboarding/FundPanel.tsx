@@ -65,8 +65,8 @@ export function FundPanel({
       <div className="space-y-2">
         <CopyField label="Your Sui address" value={address} full />
         <p className="text-[11px] text-[var(--muted)] leading-relaxed">
-          zkLogin derives this from your Google account, so it is the same address every time you sign
-          in. Send both tokens here.
+          This address comes from your Google account, so it is the same one every time you sign in.
+          Send both tokens here.
         </p>
       </div>
 
@@ -74,12 +74,12 @@ export function FundPanel({
         <BalanceTile
           symbol="SUI"
           amount={suiBalance}
-          pays="Pays Sui gas. Every wallet you create, and every signature you make, is a Sui transaction."
+          pays="Pays network fees on Sui, which coordinates every wallet you create and every payment you send."
         />
         <BalanceTile
           symbol="IKA"
           amount={ikaBalance}
-          pays="Pays 2PC-MPC session fees. The Ika validators charge in IKA for holding a share of your key and signing with it."
+          pays="Pays the validators that hold a share of your key and sign alongside you. Only needed when you create a wallet or send."
         />
       </div>
 

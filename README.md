@@ -6,7 +6,7 @@ Sign in with **Google** (zkLogin — no wallet extension, no seed phrase), get a
 address**, and create **dWallets** secured by the **Ika 2PC-MPC v4** network.
 
 One setup transaction generates a dWallet on each of the three curves Ika supports — **secp256k1**,
-**ed25519** and **ristretto** — and together they derive real addresses on **14 chains**, every one of
+**ed25519** and **ristretto** — and together they derive real addresses on **13 chains**, every one of
 which can both **send and receive**:
 
 | Curve | Chains |

@@ -23,7 +23,14 @@ const CHAIN_COUNT = CHAINS.length;
 /** Figures a reader can check against the rest of the page, not adjectives. */
 const STATS: { value: string; unit?: string; label: string }[] = [
   { value: String(CHAIN_COUNT), label: 'chains, one account' },
-  { value: '~13', unit: 's', label: 'end to end, per send' },
+  /**
+   * Stated as a ceiling, not a point estimate.
+   *
+   * "~13s" was measured on a warm send — banked presignature, decrypted share, cached proof. A cold one
+   * measured 28.2s, and a first send after opening the app is cold by definition. Advertising the warm
+   * number as the typical one is a promise the app breaks on the run that matters most: the first.
+   */
+  { value: '<30', unit: 's', label: 'end to end, per send' },
   { value: '0', label: 'seed phrases to keep' },
 ];
 
@@ -59,7 +66,7 @@ export function Hero({ onSignIn }: { onSignIn: () => void }) {
 
           {/*
            * Sizes are set against a monospace advance width, not a proportional one. JetBrains Mono is
-           * 0.6em per character, so "14 chains. No seed phrase." is ~26 × 0.6em wide with no narrow
+           * 0.6em per character, so "13 chains. No seed phrase." is ~26 × 0.6em wide with no narrow
            * glyphs to absorb the difference — a scale that looks conservative in a proportional face
            * pushes past a 375px viewport here. Each step is sized so the two lines hold at their
            * breakpoint rather than wrapping into a ragged third.

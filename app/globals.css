@@ -51,7 +51,7 @@
   --color-success: var(--success);
   --color-warning: var(--warning);
   --font-mono: var(--font-jetbrains-mono);
-  --font-sans: var(--font-jetbrains-mono);
+  --font-sans: var(--font-inter);
 }
 
 * {
@@ -71,9 +71,38 @@ body {
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: var(--font-jetbrains-mono), ui-monospace, "SF Mono", Menlo, monospace;
+  /* Prose is set in Inter; everything technical opts back into mono. See the note in app/layout.tsx. */
+  font-family: var(--font-inter), ui-sans-serif, system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
+  /*
+   * `letter-spacing: -0.5px` was tuned for monospace, where the natural advance width is wide. Applied
+   * to a proportional face at small sizes it crushes the letters together, so it is scoped to the
+   * headings and mono elements that still want it.
+   */
+  letter-spacing: normal;
+}
+
+/*
+ * Headings stay monospace: the wordmark and the display type are the brand, and they read as designed
+ * at large sizes where uniform widths are a feature rather than friction.
+ */
+h1,
+h2,
+h3,
+.font-mono,
+.num,
+.mono-label,
+input,
+textarea,
+code,
+pre {
+  font-family: var(--font-jetbrains-mono), ui-monospace, "SF Mono", Menlo, monospace;
   font-feature-settings: "ss01", "cv01", "cv02";
+}
+
+h1,
+h2,
+h3 {
   letter-spacing: -0.5px;
 }
 

@@ -14,7 +14,14 @@ import { Clock, KeySquare, Layers3 } from 'lucide-react';
 import { Reveal, Section, SectionHeader } from './shared';
 
 /** Share of a send spent inside the Sui + Ika protocols. The rest is local work and broadcast. */
-const PROTOCOL_SHARE = 74;
+/**
+   * Share of a send that is Sui + Ika protocol latency rather than our own work.
+   *
+   * From the measured cold breakdown: the MPC round and the Sui transaction that requests the signature
+   * dominate, with the client's wasm and parameter work the remainder. Rounded down deliberately — the
+   * claim should understate our share of the blame, not overstate it.
+   */
+const PROTOCOL_SHARE = 66;
 
 const TACTICS = [
   {
@@ -39,7 +46,7 @@ export function Speed() {
     <Section id="speed">
       <SectionHeader
         eyebrow="Speed"
-        title="About 13 seconds a send — and most of it is not us."
+        title="Under half a minute a send — and most of it is not us."
         lede="The work that can happen before you press Send already has. What remains is the protocol doing what it is for."
       />
 
@@ -47,7 +54,7 @@ export function Speed() {
         <div className="card p-5 sm:p-6">
           <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2">
             <p className="num text-3xl sm:text-4xl font-extrabold tracking-[-0.03em]">
-              ~13<span className="text-[var(--muted-2)]">s</span>
+              &lt;30<span className="text-[var(--muted-2)]">s</span>
               <span className="ml-3 align-middle text-[11px] font-normal tracking-normal text-[var(--muted)]">
                 end to end
               </span>

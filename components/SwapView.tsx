@@ -128,8 +128,8 @@ const ROUTES: Record<
     toChain: 'Sui',
     fromSymbol: 'SOL',
     toSymbol: 'SUI',
-    signerLabel: 'Your dWallet signs the SOL transfer',
-    fromLabel: 'your Solana dWallet',
+    signerLabel: 'Your Solana wallet signs the transfer',
+    fromLabel: 'your Solana wallet',
     toLabel: 'your Sui wallet',
   },
   suiToSol: {
@@ -141,7 +141,7 @@ const ROUTES: Record<
     toSymbol: 'SOL',
     signerLabel: 'Your Sui wallet signs the transfer',
     fromLabel: 'your Sui wallet',
-    toLabel: 'your Solana dWallet',
+    toLabel: 'your Solana wallet',
   },
 };
 
