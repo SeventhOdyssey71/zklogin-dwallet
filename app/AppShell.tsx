@@ -7,6 +7,7 @@ import { Loader2 } from 'lucide-react';
 import dynamic from 'next/dynamic';
 import { NavBar, type NavTab } from '@/components/NavBar';
 import { anyRememberedAddress, knownToHaveWallets, rememberHasWallets } from '@/lib/dwallet/walletsExist';
+import { runWhenIdle } from '@/lib/utils/whenIdle';
 import { useZkLogin, consumeExpiredNotice } from '@/lib/useZkLogin';
 import { zkLoginSignAndExecute } from '@/lib/zklogin/execute';
 // Types are erased at build time, so importing them costs nothing. `createBothDWallets` is loaded on
@@ -571,7 +572,13 @@ function AllChainsView({
           import('@/lib/ika/warmSigning'),
           import('@/lib/ika/ikaClient'),
         ]);
-        warmSigning(await getIkaClient(suiClient), suiClient);
+        /**
+         * Also deferred to a quiet moment: converting the protocol parameters is ~3.5s of wasm, and a
+         * user who lands on the dashboard and immediately opens Send would otherwise be typing into a
+         * blocked thread.
+         */
+        const ika = await getIkaClient(suiClient);
+        runWhenIdle(() => warmSigning(ika, suiClient), { quietMs: 700 });
       }
       // Registering the targets is what starts polling; the store fetches them itself.
       setTargets(nextTargets.filter((t) => CHAIN_ORDER.includes(t.chain)));

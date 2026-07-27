@@ -16,6 +16,7 @@ import { useSuiClient } from '@mysten/dapp-kit';
 import { signWithDWallet, broadcastTransaction } from '@/lib/dwallet/clientSideSigning';
 import { zkLoginSignAndExecute } from '@/lib/zklogin/execute';
 import { warmSendPath } from '@/lib/ika/warmSendPath';
+import { runWhenIdle } from '@/lib/utils/whenIdle';
 import { validateAddress, type AddressCheck } from '@/lib/utils/validateAddress';
 import { friendlyError, type FriendlyError } from '@/lib/ui/errors';
 import { recordSend } from '@/lib/history/store';
@@ -120,21 +121,29 @@ export const SendModal = memo(function SendModal({
    * It also reclaims presignatures bought by earlier abandoned attempts before spending anything new —
    * each is 0.0209 SUI + 0.12 IKA already paid for.
    */
+  /**
+   * Load the address validator's crypto library.
+   *
+   * Cheap and asynchronous — a module fetch and parse, not seconds of wasm — so unlike the signing
+   * warm-up this stays EAGER. The first call to `validateAddress` dynamically imports ethers,
+   * @solana/web3.js or @scure/btc-signer depending on the chain, and if that import is postponed it
+   * lands on the user's first keystroke instead, which is the hitch it exists to prevent.
+   */
+  const preloadValidator = () => {
+    void validateAddress(chain, '0x0000000000000000000000000000000000000000').catch(() => {});
+  };
+
+  /**
+   * Bank a presignature, decrypt the key share, mint the proof.
+   *
+   * Seconds of synchronous wasm, which is why the caller schedules this for a quiet moment rather than
+   * running it on open.
+   */
   const startWarmup = () => {
     if (warmed.current || loading) return;
     warmed.current = true;
     setWarming(true);
     void (async () => {
-      /**
-       * Load the address validator's crypto library now.
-       *
-       * The first call to `validateAddress` dynamically imports ethers, @solana/web3.js or
-       * @scure/btc-signer depending on the chain, and that import landed on the user's first keystroke
-       * — a visible hitch at the worst moment. Doing it on open means the field validates instantly
-       * from the first character. Specific to this dialog, so it stays here.
-       */
-      void validateAddress(chain, '0x0000000000000000000000000000000000000000').catch(() => {});
-
       await warmSendPath({ suiClient, zkAddress, dwalletId, chain });
       setWarming(false);
     })();
@@ -189,9 +198,18 @@ export const SendModal = memo(function SendModal({
     }
   };
 
-  // Start priming as soon as the modal opens, so the presignature is settled before Send is pressed.
+  /**
+   * Prime once the user pauses, not the instant the dialog opens.
+   *
+   * Priming is seconds of synchronous wasm, and starting it on open put it exactly where the user types
+   * the recipient and the amount — the keystrokes registered but React could not re-render, so the field
+   * kept showing an older value. Waiting for a quiet moment keeps the whole benefit (the pause after
+   * typing an amount is long before Send is pressed) and removes the collision.
+   */
   useEffect(() => {
-    if (open) startWarmup();
+    if (!open) return;
+    preloadValidator();
+    return runWhenIdle(startWarmup, { quietMs: 600 });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, chain, dwalletId]);
 

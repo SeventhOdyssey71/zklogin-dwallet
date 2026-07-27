@@ -303,8 +303,16 @@ export const SwapView = memo(function SwapView({
    */
   const warmed = useRef(false);
   useEffect(() => {
-    if (phase !== 'amount' && phase !== 'review') return;
-    if (phase === 'amount' && warmed.current) return;
+    /**
+     * Warm at Review, not while the amount is being typed.
+     *
+     * This work is seconds of synchronous wasm. Starting it when the page mounted put it on top of the
+     * amount field: keystrokes registered but React could not re-render, so "0.005" sat showing "0.0"
+     * until the wasm finished. Review is the right moment — there is nothing to type on it, the user is
+     * reading terms, and they must pass through it before confirming, so nothing is lost.
+     */
+    if (phase !== 'review') return;
+    if (warmed.current) return;
     warmed.current = true;
 
     /**
@@ -325,6 +333,7 @@ export const SwapView = memo(function SwapView({
       void warmSendPath({ suiClient, zkAddress: suiAddress, dwalletId, chain: 'Solana' });
     }
   }, [sendingSol, phase, suiClient, suiAddress, dwalletId]);
+
 
   const requested = parseFloat(amount) || 0;
   const overBalance = available !== null && requested > available;
