@@ -27,9 +27,15 @@
  *                           instead of being retried on every sweep.
  *   Deduplicated logging    one line per endpoint per failure window, not one per attempt. The old code
  *                           printed the same five lines four times per refresh.
+ *
+ * A note on that last one: deduplication was never enough on its own. An endpoint rotating out is the
+ * circuit breaker doing exactly its job — the wallet still shows a balance, read from the next endpoint
+ * in the list — so it is a developer's diagnostic, not a user's problem, and it is gated accordingly.
+ * See lib/utils/log.ts for where that line is drawn and how to switch it back on in production.
  */
 
 import { hostOf } from './endpoints';
+import { throttled } from '@/lib/utils/log';
 
 /* ----------------------------- tuning ----------------------------- */
 
@@ -146,15 +152,15 @@ function recordFailure(url: string): void {
 
 /* --------------------------- quiet logging -------------------------- */
 
-const lastLogged = new Map<string, number>();
-
-/** Log at most once per `LOG_QUIET_MS` for a given key. */
-export function quiet(key: string, message: string, level: 'warn' | 'error' = 'warn'): void {
-  const now = Date.now();
-  if ((lastLogged.get(key) ?? 0) + LOG_QUIET_MS > now) return;
-  lastLogged.set(key, now);
-  if (level === 'error') console.error(message);
-  else console.warn(message);
+/**
+ * Log at most once per `LOG_QUIET_MS` for a given key, and only when debug logging is on.
+ *
+ * Kept as a thin wrapper rather than replaced outright: every caller here is reporting something the
+ * breaker or the fallback chain has already dealt with, so `LOG_QUIET_MS` and the `warn` level are the
+ * right defaults for all of them and the call sites read better without repeating either.
+ */
+export function quiet(key: string, message: string): void {
+  throttled(key, message, { windowMs: LOG_QUIET_MS });
 }
 
 /* ------------------------------ core ------------------------------ */

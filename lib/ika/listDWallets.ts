@@ -23,6 +23,7 @@ import type { AppSuiClient } from '@/lib/sui/client';
 import { IKA_CONFIG } from '@/lib/config/network';
 import { getIkaClient } from '@/lib/ika/ikaClient';
 import type { DWalletKind } from '@/lib/ika/createDWallet';
+import { warn } from '@/lib/utils/log';
 
 export interface OwnedDWallet {
   id: string;
@@ -93,7 +94,7 @@ export async function listDWallets(
           createdAtEpoch: Number((dWallet as { created_at_epoch?: string }).created_at_epoch ?? 0),
         };
       } catch (e) {
-        console.warn('Could not load dWallet for cap', capId, e);
+        warn('Could not load dWallet for cap', capId, e);
         return null;
       }
     })

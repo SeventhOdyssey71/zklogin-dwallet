@@ -53,6 +53,7 @@ import { schnorr } from '@noble/curves/secp256k1.js';
 import { bech32, bech32m } from 'bech32';
 import { ChainSigner, UnsignedTransaction, SignedTransactionResult } from '../core/types';
 import { MAINNET_CHAINS } from '../../config/chains';
+import { debug } from '@/lib/utils/log';
 
 /** Blockstream UTXO shape. */
 interface UTXO {
@@ -318,9 +319,9 @@ export class BitcoinSigner implements ChainSigner {
       );
     }
 
-    console.log('📝 Building unsigned Bitcoin Taproot (P2TR) transaction…');
-    console.log(`📤 From: ${fromAddress}`);
-    console.log(`📥 To:   ${recipient}`);
+    debug('📝 Building unsigned Bitcoin Taproot (P2TR) transaction…');
+    debug(`📤 From: ${fromAddress}`);
+    debug(`📥 To:   ${recipient}`);
 
     // Independent network reads — run them together.
     const [utxosRes, feeRate] = await Promise.all([
@@ -341,7 +342,7 @@ export class BitcoinSigner implements ChainSigner {
 
     const amountSats = BigInt(Math.floor(parseFloat(amount) * 1e8));
     if (amountSats <= 0n) throw new Error('Amount must be greater than zero');
-    console.log(`💰 Sending ${amount} BTC (${amountSats} sats) at ${feeRate} sat/vB`);
+    debug(`💰 Sending ${amount} BTC (${amountSats} sats) at ${feeRate} sat/vB`);
 
     // Exact fee for each shape, using the real recipient script length.
     const recipientScriptEarly = addressToScript(recipient);
@@ -410,8 +411,8 @@ export class BitcoinSigner implements ChainSigner {
     const SEQUENCE = 0xfffffffd; // RBF-enabled
 
     const vsize = withChange ? vsizeWithChange : vsizeNoChange;
-    console.log(`📊 1 input (${chosen.value} sats) → ${outputs.length} output(s), ${vsize} vB`);
-    console.log(
+    debug(`📊 1 input (${chosen.value} sats) → ${outputs.length} output(s), ${vsize} vB`);
+    debug(
       `   fee ${fee} sats (${(Number(fee) / vsize).toFixed(2)} sat/vB)` +
         `${withChange ? `, change ${change} sats` : ' — no change; remainder swept to fee'}`
     );
@@ -463,7 +464,7 @@ export class BitcoinSigner implements ChainSigner {
           `built=${bytesToHex(derivedSighash)} expected=${bytesToHex(authoritativeSighash)}`
       );
     }
-    console.log(`✅ BIP341 sighash verified against @scure/btc-signer: ${bytesToHex(derivedSighash).slice(0, 16)}…`);
+    debug(`✅ BIP341 sighash verified against @scure/btc-signer: ${bytesToHex(derivedSighash).slice(0, 16)}…`);
 
     return {
       messageBytes,
@@ -508,14 +509,14 @@ export class BitcoinSigner implements ChainSigner {
           'Refusing to broadcast an invalid transaction.'
       );
     }
-    console.log('✅ Schnorr signature verifies against the taproot output key');
+    debug('✅ Schnorr signature verifies against the taproot output key');
 
     tx.updateInput(0, { finalScriptWitness: [sig] });
 
     const serialized = bytesToHex(tx.extract());
     const txid = tx.id;
 
-    console.log('📡 Broadcasting Bitcoin Taproot transaction…');
+    debug('📡 Broadcasting Bitcoin Taproot transaction…');
     const res = await fetch(`${this.rpcUrl}/tx`, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain' },
@@ -527,8 +528,8 @@ export class BitcoinSigner implements ChainSigner {
     }
     const broadcastTxid = (await res.text()).trim();
 
-    console.log('✅ Broadcast:', broadcastTxid);
-    console.log('📋 Explorer:', `${MAINNET_CHAINS.Bitcoin.blockExplorer}/tx/${broadcastTxid}`);
+    debug('✅ Broadcast:', broadcastTxid);
+    debug('📋 Explorer:', `${MAINNET_CHAINS.Bitcoin.blockExplorer}/tx/${broadcastTxid}`);
 
     return {
       signature: '0x' + bytesToHex(sig),

@@ -32,6 +32,7 @@
  */
 
 import { CHAIN_BY_ID } from '@/lib/config/chainRegistry';
+import { reportTransaction } from '@/lib/account/report';
 
 export type EntryKind = 'send' | 'receive';
 
@@ -184,6 +185,22 @@ export function recordSend(params: {
     counterparty: params.recipient,
     txHash: params.txHash,
     at: Date.now(),
+  });
+  /**
+   * Outside `record`, deliberately.
+   *
+   * `record` also handles detected receives, which are inferred from a balance rising and so have no hash
+   * and no certainty about when or from whom — exactly the rows the volume table refuses. Reporting from
+   * here keeps the ledger to value we know we moved. A re-render that calls this twice is harmless: the
+   * server drops the second by (chain, tx_hash).
+   */
+  reportTransaction({
+    kind: 'send',
+    chain: params.chain,
+    symbol: params.symbol,
+    amount: params.amount,
+    counterparty: params.recipient,
+    txHash: params.txHash,
   });
 }
 

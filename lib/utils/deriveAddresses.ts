@@ -20,12 +20,13 @@
 
 /**
  * Verbose derivation logging, off by default — this ran on every balance refresh.
- * Set NEXT_PUBLIC_DEBUG_BALANCES=1 to re-enable.
+ *
+ * The local helper this replaces called *itself* instead of `console.log`, so switching the flag on
+ * would have blown the stack rather than printed anything. It went unnoticed precisely because the
+ * flag defaults to off: the gate was never exercised. That is the argument for one shared
+ * implementation in lib/utils/log.ts rather than a hand-rolled three-liner per module.
  */
-const VERBOSE = process.env.NEXT_PUBLIC_DEBUG_BALANCES === '1';
-const debug = (...args: unknown[]) => {
-  if (VERBOSE) debug(...args);
-};
+import { debug, error as logError, warn } from './log';
 
 
 /**
@@ -81,7 +82,7 @@ export function deriveEthereumAddress(publicKey: string): string {
     debug('✅ Ethereum address derived:', ethereumAddress);
     return ethereumAddress;
   } catch (error) {
-    console.error('Error deriving Ethereum address:', error);
+    logError('Error deriving Ethereum address:', error);
     return 'Invalid public key';
   }
 }
@@ -104,7 +105,7 @@ export function deriveBitcoinAddress(publicKey: string): string {
     const { xOnlyPublicKey, p2trAddress } = require('../dwallet/chains/bitcoin');
     return p2trAddress(xOnlyPublicKey(publicKey));
   } catch (error) {
-    console.error('Error deriving Bitcoin Taproot address:', error);
+    logError('Error deriving Bitcoin Taproot address:', error);
     return 'Invalid public key';
   }
 }
@@ -130,7 +131,7 @@ export function deriveSolanaAddress(publicKey: string): string {
     debug('   ✅ Solana address:', address);
     return address;
   } catch (error) {
-    console.error('Error deriving Solana address:', error);
+    logError('Error deriving Solana address:', error);
     return 'Invalid public key';
   }
 }
@@ -175,7 +176,7 @@ export function derivePolkadotAddress(publicKey: string): string {
     const encode = bs58.encode || bs58.default?.encode || bs58.default;
     return typeof encode === 'function' ? encode(address) : bs58(address);
   } catch (error) {
-    console.error('Error deriving Polkadot address:', error);
+    logError('Error deriving Polkadot address:', error);
     return 'Invalid public key';
   }
 }
@@ -230,7 +231,7 @@ export function deriveCardanoAddress(publicKey: string): string {
 
     return address;
   } catch (error) {
-    console.error('Error deriving Cardano address:', error);
+    logError('Error deriving Cardano address:', error);
     return 'Invalid public key';
   }
 }
@@ -249,7 +250,7 @@ export function deriveNearAddress(publicKey: string): string {
     const hex = publicKey.startsWith('0x') ? publicKey.slice(2) : publicKey;
     return hex.toLowerCase();  // NEAR requires lowercase hex
   } catch (error) {
-    console.error('Error deriving NEAR address:', error);
+    logError('Error deriving NEAR address:', error);
     return 'Invalid public key';
   }
 }
@@ -297,7 +298,7 @@ export function deriveChainAddresses(publicKey: string, curve: number): { [chain
     try {
       return fn();
     } catch (e) {
-      console.warn('address derivation failed:', e);
+      warn('address derivation failed:', e);
       return 'Invalid public key';
     }
   };

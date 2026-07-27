@@ -23,6 +23,7 @@ import { clearHistory } from "@/lib/history/store";
 import { clearSigningWarmup } from "@/lib/ika/warmSigning";
 import { clearZkLoginProofWarmup } from "@/lib/zklogin/execute";
 import { clearWalletsExist } from "@/lib/dwallet/walletsExist";
+import { reportAccount } from "@/lib/account/report";
 
 export interface ZkUser {
   address: string;
@@ -87,11 +88,26 @@ function useZkLoginState(initiallySignedIn: boolean) {
      * Treating that as signed-out sends them back through login, which is the only thing that fixes it.
      */
     const keyAlive = loadEphemeral() !== null;
+    const live = r.signedIn && keyAlive && !hasExpired(r.expiresAt);
     setUser(
-      r.signedIn && keyAlive && !hasExpired(r.expiresAt)
-        ? { address: r.address, email: r.email, name: r.name, expiresAt: r.expiresAt }
-        : null
+      live ? { address: r.address, email: r.email, name: r.name, expiresAt: r.expiresAt } : null
     );
+    /**
+     * File the account in Postgres.
+     *
+     * On every resolved session rather than only on the OAuth callback, because a returning visitor never
+     * goes through the callback again — their cookie is already good — and `last_seen` is supposed to
+     * mean the last time they were here, not the last time they authenticated. The write is an upsert, so
+     * the repetition costs one statement and changes one timestamp.
+     *
+     * Addresses are not sent from here: they are derived in the dashboard, which reports them itself once
+     * discovery finishes. This call exists so an account that has not yet created its dWallets — and
+     * therefore derives nothing — still appears.
+     *
+     * Fire-and-forget, and not awaited before `setLoading(false)`: this runs on the path that decides
+     * whether to render the app, and a slow database must not hold up the first paint.
+     */
+    if (live) reportAccount();
     setLoading(false);
   }, []);
 

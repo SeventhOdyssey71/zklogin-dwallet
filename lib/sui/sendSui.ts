@@ -18,6 +18,7 @@ import { Transaction, coinWithBalance } from '@mysten/sui/transactions';
 import { isValidSuiAddress } from '@mysten/sui/utils';
 import type { AppSuiClient } from '@/lib/sui/client';
 import { IKA_COIN_TYPE, SUI_COIN_TYPE } from '@/lib/config/network';
+import { FEE_MIST, FEE_SUI, attachProtocolFee } from '@/lib/fees/protocolFee';
 
 export { SUI_COIN_TYPE };
 
@@ -98,8 +99,17 @@ export function toBaseUnits(amount: string, decimals: number): bigint {
 /** The most that can be sent, leaving gas headroom for SUI. */
 export function maxSendable(asset: SuiAsset): bigint {
   const raw = BigInt(asset.raw);
-  if (asset.type !== SUI_COIN_TYPE) return raw;
-  return raw > SUI_GAS_RESERVE_MIST ? raw - SUI_GAS_RESERVE_MIST : 0n;
+  /**
+   * The service fee is deducted for every asset, not only SUI.
+   *
+   * It is paid in SUI whatever is being sent, so sending the whole of some other coin would still leave
+   * the transaction unable to cover it. Holding it back here means "Max" always produces an amount that
+   * actually goes through — discovering the fee exists because a transfer aborted is the worst possible
+   * introduction to it.
+   */
+  const reserve = asset.type === SUI_COIN_TYPE ? SUI_GAS_RESERVE_MIST + FEE_MIST : 0n;
+  const spendable = raw > reserve ? raw - reserve : 0n;
+  return asset.type === SUI_COIN_TYPE ? spendable : raw;
 }
 
 export interface SuiSendCheck {
@@ -133,9 +143,9 @@ export function checkSuiSend(params: {
     if (requested > max) {
       if (params.asset.type === SUI_COIN_TYPE) {
         blockers.push(
-          `Amount exceeds the spendable balance. SUI pays its own gas, so ` +
-            `${fmt(SUI_GAS_RESERVE_MIST, 9)} SUI is held back — the most you can send is ` +
-            `${fmt(max, 9)} SUI.`
+          `Amount exceeds the spendable balance. SUI pays its own gas and the ${FEE_SUI} SUI ` +
+            `service fee, so ${fmt(SUI_GAS_RESERVE_MIST + FEE_MIST, 9)} SUI is held back — the most ` +
+            `you can send is ${fmt(max, 9)} SUI.`
         );
       } else {
         blockers.push(
@@ -171,6 +181,9 @@ export function buildSuiSendTransaction(params: {
 }): Transaction {
   const tx = new Transaction();
   tx.setSender(params.sender);
+
+  // The service fee rides in the same transaction, so it cannot succeed while the transfer fails.
+  attachProtocolFee(tx);
 
   const isSui = params.asset.type === SUI_COIN_TYPE;
   const coin = coinWithBalance({

@@ -25,6 +25,7 @@
 import type { AppSuiClient } from '@/lib/sui/client';
 import type { Curve } from '@ika.xyz/sdk';
 import { zkLoginSignAndExecute } from '@/lib/zklogin/execute';
+import { warn } from '@/lib/utils/log';
 
 export interface WarmSendPathParams {
   suiClient: AppSuiClient;
@@ -83,7 +84,7 @@ async function decryptShareAhead(
     });
   } catch (e) {
     // Non-fatal: the send path decrypts inline if this hasn't finished.
-    console.warn('[share] pre-decryption skipped:', e instanceof Error ? e.message : e);
+    warn('[share] pre-decryption skipped:', e instanceof Error ? e.message : e);
   }
 }
 
@@ -140,6 +141,6 @@ export async function warmSendPath(params: WarmSendPathParams): Promise<void> {
     });
   } catch (e) {
     // Non-fatal: the send path buys its own presignature if the pool is empty.
-    console.warn('[presign] pool priming skipped:', e instanceof Error ? e.message : e);
+    warn('[presign] pool priming skipped:', e instanceof Error ? e.message : e);
   }
 }

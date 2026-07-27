@@ -10,6 +10,7 @@
 
 import { ChainSigner, UnsignedTransaction, SignedTransactionResult } from '../core/types';
 import { NEAR_MAINNET } from '../../config/chains';
+import { debug, error as logError } from '@/lib/utils/log';
 
 /**
  * NEAR chain signer for mainnet
@@ -24,7 +25,7 @@ export class NearSigner implements ChainSigner {
     fromAddress: string,
     publicKey?: string
   ): Promise<UnsignedTransaction> {
-    console.log(`📝 Building unsigned NEAR transaction...`);
+    debug(`📝 Building unsigned NEAR transaction...`);
 
     if (!publicKey) {
       throw new Error('Public key is required for NEAR transactions');
@@ -41,12 +42,12 @@ export class NearSigner implements ChainSigner {
         throw new Error('Invalid amount');
       }
 
-      console.log(`💰 Sending ${amount} NEAR (${amountInYocto} yoctoNEAR)`);
-      console.log(`📤 From: ${fromAddress}`);
-      console.log(`📥 To: ${recipient}`);
+      debug(`💰 Sending ${amount} NEAR (${amountInYocto} yoctoNEAR)`);
+      debug(`📤 From: ${fromAddress}`);
+      debug(`📥 To: ${recipient}`);
 
       // Get access key info (includes nonce and block hash)
-      console.log('🔍 Fetching access key info...');
+      debug('🔍 Fetching access key info...');
       const provider = new (await import('near-api-js')).providers.JsonRpcProvider({
         url: NEAR_MAINNET.rpcUrl,
       });
@@ -62,7 +63,7 @@ export class NearSigner implements ChainSigner {
       const pubKeyBase58 = typeof encode === 'function' ? encode(pubKeyBytes) : bs58(pubKeyBytes);
       const nearPublicKey = utils.PublicKey.fromString(`ed25519:${pubKeyBase58}`);
 
-      console.log(`🔑 Public key (base58): ${nearPublicKey.toString()}`);
+      debug(`🔑 Public key (base58): ${nearPublicKey.toString()}`);
 
       // Query access key
       let accessKey: any;
@@ -89,8 +90,8 @@ export class NearSigner implements ChainSigner {
       const nonce = accessKey.nonce + 1; // Increment nonce
       const blockHash = utils.serialize.base_decode(accessKey.block_hash);
 
-      console.log(`✅ Nonce: ${nonce}`);
-      console.log(`✅ Block hash: ${accessKey.block_hash}`);
+      debug(`✅ Nonce: ${nonce}`);
+      debug(`✅ Block hash: ${accessKey.block_hash}`);
 
       // Create transfer action
       // parseNearAmount returns string, but transfer expects bigint
@@ -115,9 +116,9 @@ export class NearSigner implements ChainSigner {
       // Hash serialized transaction with SHA256
       const serializedTxHash = new Uint8Array(sha256.sha256.array(serializedTx));
 
-      console.log(`✅ NEAR transaction built`);
-      console.log(`📋 Transaction hash (SHA256): ${Buffer.from(serializedTxHash).toString('hex')}`);
-      console.log(`📋 Message to sign (${serializedTxHash.length} bytes)`);
+      debug(`✅ NEAR transaction built`);
+      debug(`📋 Transaction hash (SHA256): ${Buffer.from(serializedTxHash).toString('hex')}`);
+      debug(`📋 Message to sign (${serializedTxHash.length} bytes)`);
 
       return {
         messageBytes: serializedTxHash,
@@ -129,7 +130,7 @@ export class NearSigner implements ChainSigner {
         },
       };
     } catch (error) {
-      console.error('❌ Error building NEAR transaction:', error);
+      logError('❌ Error building NEAR transaction:', error);
       throw error;
     }
   }
@@ -141,7 +142,7 @@ export class NearSigner implements ChainSigner {
     unsignedTx: any,
     signature: Uint8Array
   ): Promise<SignedTransactionResult> {
-    console.log('📡 Broadcasting transaction to NEAR mainnet...');
+    debug('📡 Broadcasting transaction to NEAR mainnet...');
 
     try {
       const { transaction, transactions } = unsignedTx;
@@ -149,7 +150,7 @@ export class NearSigner implements ChainSigner {
       // ED25519 signature is 64 bytes
       const signatureBytes = signature.slice(0, 64);
       const signatureHex = Buffer.from(signatureBytes).toString('hex');
-      console.log(`🔐 Signature (${signature.length} bytes):`, signatureHex);
+      debug(`🔐 Signature (${signature.length} bytes):`, signatureHex);
 
       // Create Signature object
       const nearSignature = new transactions.Signature({
@@ -167,18 +168,18 @@ export class NearSigner implements ChainSigner {
       const signedSerializedTx = signedTransaction.encode();
       const signedTxBase64 = Buffer.from(signedSerializedTx).toString('base64');
 
-      console.log(`📦 Signed transaction (${signedSerializedTx.length} bytes)`);
+      debug(`📦 Signed transaction (${signedSerializedTx.length} bytes)`);
 
       // Submit to NEAR RPC
-      console.log('📡 Submitting transaction to NEAR network...');
+      debug('📡 Submitting transaction to NEAR network...');
       const provider = new (await import('near-api-js')).providers.JsonRpcProvider({
         url: NEAR_MAINNET.rpcUrl,
       });
 
       const result = await provider.sendJsonRpc('broadcast_tx_commit', [signedTxBase64]) as any;
 
-      console.log('✅ Transaction submitted successfully');
-      console.log('📋 Result:', result);
+      debug('✅ Transaction submitted successfully');
+      debug('📋 Result:', result);
 
       // Extract transaction hash
       const txHash = result.transaction?.hash || 'unknown';
@@ -189,7 +190,7 @@ export class NearSigner implements ChainSigner {
         txHash: txHash,
       };
     } catch (error) {
-      console.error('❌ NEAR broadcast failed:', error);
+      logError('❌ NEAR broadcast failed:', error);
       throw error;
     }
   }

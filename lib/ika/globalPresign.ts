@@ -43,6 +43,7 @@
 import { Curve, SignatureAlgorithm } from '@ika.xyz/sdk';
 import type { AppSuiClient } from '@/lib/sui/client';
 import { IKA_CONFIG } from '@/lib/config/network';
+import { warn } from '@/lib/utils/log';
 
 /** Bag key under `DWalletCoordinatorInner.extra_fields`. */
 const GLOBAL_PRESIGN_CONFIG_KEY = 'global_presign_config';
@@ -237,7 +238,7 @@ export async function getGlobalPresignPolicy(
     cachedPolicy = { policy, at: Date.now() };
     return policy;
   } catch (e) {
-    console.warn('[ika/v4] could not read global presign policy, falling back:', e);
+    warn('[ika/v4] could not read global presign policy, falling back:', e);
     return null;
   }
 }

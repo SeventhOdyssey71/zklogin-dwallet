@@ -8,9 +8,14 @@
  * one that took 15ms looked identical. This records each phase and prints one compact table at the
  * end, so the next slow send explains itself without adding instrumentation after the fact.
  *
- * Deliberately always on (unlike the verbose `debug` logs) — it is a handful of lines and it is the
- * only thing that makes a latency regression visible.
+ * It stays on in development, where it is the only thing that makes a latency regression visible, but
+ * it is a developer's instrument and not a user's: someone sending 0.005 SOL has no use for a phase
+ * breakdown of the MPC round. In production it is behind the shared gate along with everything else,
+ * so `localStorage.setItem('ycos.debug','1')` brings it back on a deployed build without a rebuild —
+ * which is exactly the situation a latency report comes from. See lib/utils/log.ts.
  */
+
+import { debug, isDebugEnabled } from '@/lib/utils/log';
 
 export interface Phase {
   name: string;
@@ -50,6 +55,10 @@ export class Timings {
    * we are trying to create. Each row shows its share of wall-clock so the dominant cost is obvious.
    */
   report(): void {
+    // Checked before the table is *built*, not just before it is printed: laying out a dozen padded
+    // rows and their bar charts is real work to throw away on every send of a production session.
+    if (!isDebugEnabled()) return;
+
     const total = this.elapsed;
     const width = Math.max(...this.phases.map((p) => p.name.length), 10);
     const lines = this.phases.map((p) => {
@@ -57,7 +66,7 @@ export class Timings {
       const bar = '█'.repeat(Math.min(20, Math.round(pct / 5)));
       return `  ${String(Math.round(p.ms)).padStart(6)} ms  ${String(pct).padStart(3)}%  ${p.name.padEnd(width)} ${bar}`;
     });
-    console.log(
+    debug(
       `\n⏱️  ${this.label} — ${(total / 1000).toFixed(1)}s total\n${lines.join('\n')}\n` +
         `  ${String(Math.round(total)).padStart(6)} ms  100%  ${'wall clock'.padEnd(width)}\n`
     );

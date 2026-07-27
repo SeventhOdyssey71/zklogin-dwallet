@@ -16,6 +16,7 @@ import { useSuiClient } from '@mysten/dapp-kit';
 import { signWithDWallet, broadcastTransaction } from '@/lib/dwallet/clientSideSigning';
 import { zkLoginSignAndExecute } from '@/lib/zklogin/execute';
 import { warmSendPath } from '@/lib/ika/warmSendPath';
+import { FEE_LABEL, FEE_SUI } from '@/lib/fees/protocolFee';
 import { runWhenIdle } from '@/lib/utils/whenIdle';
 import { validateAddress, type AddressCheck } from '@/lib/utils/validateAddress';
 import { friendlyError, type FriendlyError } from '@/lib/ui/errors';
@@ -23,6 +24,7 @@ import { recordSend } from '@/lib/history/store';
 import { txUrl } from '@/lib/config/chainRegistry';
 import { NONCE_RENT_SOL } from '@/lib/ika/enableDurableNonce';
 import { Button, CopyField, ErrorNote, Modal, StatusNote } from '@/components/ui';
+import { error as logError } from '@/lib/utils/log';
 
 interface SendModalProps {
   open: boolean;
@@ -190,7 +192,7 @@ export const SendModal = memo(function SendModal({
         { description: 'Solana sends no longer race a blockhash deadline.' }
       );
     } catch (e) {
-      console.error(e);
+      logError(e);
       setError(friendlyError(e));
     } finally {
       setEnabling(false);
@@ -289,7 +291,7 @@ export const SendModal = memo(function SendModal({
       toast.success(`Sent ${amount} ${symbol}`, { description: `on ${chain}` });
       onSent?.();
     } catch (e) {
-      console.error(e);
+      logError(e);
       setError(friendlyError(e));
     } finally {
       setLoading(false);
@@ -451,6 +453,17 @@ export const SendModal = memo(function SendModal({
           )}
           {status && <StatusNote>{status}</StatusNote>}
           {error && <ErrorNote {...error} />}
+
+          {/*
+            Stated before the button, not after the fact.
+            
+            It is ours rather than the network's, and it is trivially visible on chain, so naming it costs
+            one line and buys the difference between a charge and a surprise. See lib/fees/protocolFee.ts.
+          */}
+          <div className="flex items-baseline justify-between">
+            <span className="mono-label">{FEE_LABEL}</span>
+            <span className="num text-xs text-[var(--muted)]">{FEE_SUI} SUI</span>
+          </div>
 
           <Button
             size="lg"

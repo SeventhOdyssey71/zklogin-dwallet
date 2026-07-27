@@ -50,6 +50,7 @@ export type { DWalletKind } from './curves';
 export { ALL_KINDS } from './curves';
 import { ALL_KINDS, type DWalletKind } from './curves';
 import { ensureProtocolPublicParameters } from '@/lib/ika/protocolParams';
+import { debug, warn } from '@/lib/utils/log';
 
 /**
  * dWallet state polling.
@@ -193,7 +194,7 @@ export async function createBothDWallets(
 ): Promise<CreatedDWallet[]> {
   const { suiClient, account, signAndExecuteAsync, onStatus, skip = [] } = params;
   const status = (step: CreateStep, message: string) => {
-    console.log(`[${step}] ${message}`);
+    debug(`[${step}] ${message}`);
     onStatus?.(step, message);
   };
 
@@ -459,7 +460,7 @@ async function deriveDisplay(
     }
     return { publicKey, address: base58Encode(pk) };
   } catch (e) {
-    console.warn('Could not derive display address:', e);
+    warn('Could not derive display address:', e);
     return { publicKey: '', address: '' };
   }
 }

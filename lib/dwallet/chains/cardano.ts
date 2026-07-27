@@ -11,6 +11,7 @@
  */
 
 import { ChainSigner, UnsignedTransaction, SignedTransactionResult } from '../core/types';
+import { debug, error as logError } from '@/lib/utils/log';
 
 /**
  * Cardano chain signer for mainnet
@@ -25,7 +26,7 @@ export class CardanoSigner implements ChainSigner {
     fromAddress: string,
     publicKey?: string
   ): Promise<UnsignedTransaction> {
-    console.log(`📝 Building unsigned Cardano transaction...`);
+    debug(`📝 Building unsigned Cardano transaction...`);
 
     if (!publicKey) {
       throw new Error('Public key is required for Cardano transactions');
@@ -38,12 +39,12 @@ export class CardanoSigner implements ChainSigner {
       // Convert ADA to lovelace (1 ADA = 1,000,000 lovelace)
       const amountInLovelace = Math.floor(parseFloat(amount) * 1e6);
 
-      console.log(`💰 Sending ${amount} tADA (${amountInLovelace} lovelace)`);
-      console.log(`📤 From: ${fromAddress}`);
-      console.log(`📥 To: ${recipient}`);
+      debug(`💰 Sending ${amount} tADA (${amountInLovelace} lovelace)`);
+      debug(`📤 From: ${fromAddress}`);
+      debug(`📥 To: ${recipient}`);
 
       // Fetch UTXOs for the sender address
-      console.log('🔍 Fetching UTXOs from Koios API...');
+      debug('🔍 Fetching UTXOs from Koios API...');
       const utxosResponse = await fetch(`/api/cardano-utxos?address=${fromAddress}`);
       if (!utxosResponse.ok) {
         throw new Error(`Failed to fetch UTXOs: ${utxosResponse.status}`);
@@ -54,20 +55,20 @@ export class CardanoSigner implements ChainSigner {
         throw new Error('No UTXOs found for this address. Address needs to be funded first.');
       }
 
-      console.log(`✅ Found ${utxosData.length} UTXOs`);
+      debug(`✅ Found ${utxosData.length} UTXOs`);
 
       // Get protocol parameters
-      console.log('🔍 Fetching protocol parameters...');
+      debug('🔍 Fetching protocol parameters...');
       const paramsResponse = await fetch('/api/cardano-params');
       if (!paramsResponse.ok) {
         throw new Error(`Failed to fetch protocol parameters: ${paramsResponse.status}`);
       }
 
       const protocolParams = await paramsResponse.json();
-      console.log('✅ Protocol parameters fetched');
+      debug('✅ Protocol parameters fetched');
 
       // Get current chain tip to calculate accurate TTL
-      console.log('🔍 Fetching current chain tip for TTL...');
+      debug('🔍 Fetching current chain tip for TTL...');
       const tipResponse = await fetch('/api/cardano-tip');
       if (!tipResponse.ok) {
         throw new Error(`Failed to fetch chain tip: ${tipResponse.status}`);
@@ -75,7 +76,7 @@ export class CardanoSigner implements ChainSigner {
 
       const tipData = await tipResponse.json();
       const currentSlot = tipData.abs_slot;
-      console.log(`✅ Current slot: ${currentSlot}`);
+      debug(`✅ Current slot: ${currentSlot}`);
 
       // Build transaction using Cardano serialization library
       const txBuilder = CardanoWasm.TransactionBuilder.new(
@@ -120,7 +121,7 @@ export class CardanoSigner implements ChainSigner {
         totalInput += parseInt(utxo.value);
       }
 
-      console.log(`💰 Total input: ${totalInput} lovelace`);
+      debug(`💰 Total input: ${totalInput} lovelace`);
 
       // Add output (recipient)
       const recipientAddress = CardanoWasm.Address.from_bech32(recipient);
@@ -132,7 +133,7 @@ export class CardanoSigner implements ChainSigner {
 
       // Set TTL (time to live) - current slot + 2 hours (assuming 1 second per slot)
       const ttl = currentSlot + 7200; // 2 hours = 7200 slots
-      console.log(`⏰ Setting TTL to slot ${ttl} (current: ${currentSlot}, +2 hours)`);
+      debug(`⏰ Setting TTL to slot ${ttl} (current: ${currentSlot}, +2 hours)`);
       txBuilder.set_ttl(ttl);
 
       // Add change output and calculate fee
@@ -151,9 +152,9 @@ export class CardanoSigner implements ChainSigner {
       const txBodyHash = blake2b(txBodyBytes, null, 32); // 32 bytes = 256 bits
       const messageBytes = new Uint8Array(txBodyHash);
 
-      console.log(`✅ Cardano transaction built`);
-      console.log(`📋 Transaction body hash: ${Buffer.from(messageBytes).toString('hex')}`);
-      console.log(`📋 Message to sign (${messageBytes.length} bytes)`);
+      debug(`✅ Cardano transaction built`);
+      debug(`📋 Transaction body hash: ${Buffer.from(messageBytes).toString('hex')}`);
+      debug(`📋 Message to sign (${messageBytes.length} bytes)`);
 
       return {
         messageBytes,
@@ -165,7 +166,7 @@ export class CardanoSigner implements ChainSigner {
         },
       };
     } catch (error) {
-      console.error('❌ Error building Cardano transaction:', error);
+      logError('❌ Error building Cardano transaction:', error);
       throw error;
     }
   }
@@ -177,7 +178,7 @@ export class CardanoSigner implements ChainSigner {
     unsignedTx: any,
     signature: Uint8Array
   ): Promise<SignedTransactionResult> {
-    console.log('📡 Broadcasting transaction to Cardano mainnet...');
+    debug('📡 Broadcasting transaction to Cardano mainnet...');
 
     try {
       const { txBody, publicKey, CardanoWasm } = unsignedTx;
@@ -185,13 +186,13 @@ export class CardanoSigner implements ChainSigner {
       // ED25519 signature is 64 bytes
       const signatureBytes = signature.slice(0, 64);
       const signatureHex = Buffer.from(signatureBytes).toString('hex');
-      console.log(`🔐 Signature (${signature.length} bytes):`, signatureHex);
+      debug(`🔐 Signature (${signature.length} bytes):`, signatureHex);
 
       // Parse public key (remove 0x prefix if present)
       const pubKeyHex = publicKey.startsWith('0x') ? publicKey.slice(2) : publicKey;
       const pubKeyBytes = Buffer.from(pubKeyHex, 'hex');
 
-      console.log(`🔑 Public key (${pubKeyBytes.length} bytes):`, pubKeyHex);
+      debug(`🔑 Public key (${pubKeyBytes.length} bytes):`, pubKeyHex);
 
       // Create witness set with the signature
       const vkeyWitnesses = CardanoWasm.Vkeywitnesses.new();
@@ -217,12 +218,12 @@ export class CardanoSigner implements ChainSigner {
       const txBytes = signedTx.to_bytes();
       const txHex = Buffer.from(txBytes).toString('hex');
 
-      console.log(`📦 Signed transaction (${txBytes.length} bytes)`);
-      console.log(`📋 TX hex: ${txHex.substring(0, 100)}...`);
-      console.log(`📋 TX CBOR structure (first byte): 0x${txHex.substring(0, 2)}`);
+      debug(`📦 Signed transaction (${txBytes.length} bytes)`);
+      debug(`📋 TX hex: ${txHex.substring(0, 100)}...`);
+      debug(`📋 TX CBOR structure (first byte): 0x${txHex.substring(0, 2)}`);
 
       // Submit to Koios API via our proxy
-      console.log('📡 Submitting transaction to Cardano network...');
+      debug('📡 Submitting transaction to Cardano network...');
       const submitResponse = await fetch('/api/cardano-submit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -237,8 +238,8 @@ export class CardanoSigner implements ChainSigner {
       }
 
       const result = await submitResponse.json();
-      console.log('✅ Transaction submitted successfully');
-      console.log('📋 Result:', result);
+      debug('✅ Transaction submitted successfully');
+      debug('📋 Result:', result);
 
       // Compute transaction ID from signed transaction (already have txBytes from above)
       const { blake2b } = require('blakejs');
@@ -251,7 +252,7 @@ export class CardanoSigner implements ChainSigner {
         txHash: finalTxHash,
       };
     } catch (error) {
-      console.error('❌ Cardano broadcast failed:', error);
+      logError('❌ Cardano broadcast failed:', error);
       throw error;
     }
   }

@@ -26,6 +26,7 @@
 import { Curve } from '@ika.xyz/sdk';
 import type { AppSuiClient } from '@/lib/sui/client';
 import { getIkaClient } from '@/lib/ika/ikaClient';
+import { warn } from '@/lib/utils/log';
 
 /** Bumped if the derivation or stored shape changes. */
 const CACHE_VERSION = 'v1';
@@ -237,7 +238,7 @@ async function findEncryptedShareId(
     | undefined;
   const tableId = typeof shares?.id === 'string' ? shares.id : shares?.id?.id;
   if (!tableId) {
-    console.warn('[dwallet] no encrypted_user_secret_key_shares table found');
+    warn('[dwallet] no encrypted_user_secret_key_shares table found');
     return undefined;
   }
 

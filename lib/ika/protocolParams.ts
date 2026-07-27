@@ -70,6 +70,7 @@
 import { Curve, reconfigurationPublicOutputToProtocolPublicParameters } from '@ika.xyz/sdk';
 import type { IkaClient } from '@ika.xyz/sdk';
 import type { AppSuiClient } from '@/lib/sui/client';
+import { error as logError, warn } from '@/lib/utils/log';
 
 /**
  * Move curve discriminants, mirrored from `lib/ika/presignPool.ts`.
@@ -160,7 +161,7 @@ export async function ensureProtocolPublicParameters(
       params ??
       (await reconfigurationPublicOutputToProtocolPublicParameters(selectedCurve, reconfig, dkg));
 
-    console.warn(
+    warn(
       `[ika] ${(error as Error).message} — @ika.xyz/ika-wasm@0.2.1 cannot read the current ` +
         `reconfiguration output format. Using epoch ${epoch}, the newest this build can read; its ` +
         `protocol public parameters are the same value (see lib/ika/protocolParams.ts).`
@@ -205,12 +206,18 @@ export async function ensureProtocolPublicParameters(
   }
 }
 
-/** Log at most once per process per key — a broken seam would otherwise print on every single send. */
+/**
+ * Report at most once per process per key.
+ *
+ * At `error` level, and it stays there in production: reaching this means the SDK internals the
+ * workaround primes have moved, so signing is about to fail inside `requestSign` with no useful
+ * message of its own. Once-per-process is what keeps that from printing on every send.
+ */
 const warned = new Set<string>();
 function warnOnce(key: string, message: string): void {
   if (warned.has(key)) return;
   warned.add(key);
-  console.error(message);
+  logError(message);
 }
 
 /** True for the wasm's "this variant is newer than I am" BCS error, and nothing else. */

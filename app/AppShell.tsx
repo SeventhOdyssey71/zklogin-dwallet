@@ -27,10 +27,12 @@ import type { DashboardActivity, DashboardChain } from '@/components/dashboard/s
 import { refreshGasBalances, useGasBalances } from '@/lib/sui/useGasBalances';
 import { IKA_ACQUIRE_URL } from '@/lib/config/network';
 import { readHistory, subscribe as subscribeHistory } from '@/lib/history/store';
+import { reportAccount } from '@/lib/account/report';
 import { Button, ErrorNote, truncate } from '@/components/ui';
 import { useBalances, REFRESH_SECONDS, type BalanceTarget } from '@/lib/balances/useBalances';
 import { friendlyError, type FriendlyError } from '@/lib/ui/errors';
 import { txUrl } from '@/lib/config/chainRegistry';
+import { error as logError } from '@/lib/utils/log';
 
 /**
  * The send dialog, loaded on demand.
@@ -433,7 +435,7 @@ function CreateView({
         { description: created.map((c) => c.curve).join(' + ') }
       );
     } catch (e) {
-      console.error(e);
+      logError(e);
       const friendly = friendlyError(e);
       setError(friendly);
       toast.error('Creation failed', { description: friendly.message });
@@ -583,6 +585,21 @@ function AllChainsView({
       // Registering the targets is what starts polling; the store fetches them itself.
       setTargets(nextTargets.filter((t) => CHAIN_ORDER.includes(t.chain)));
 
+      /**
+       * File the account and its derived addresses in Postgres.
+       *
+       * Here rather than at sign-in because this is the only place the addresses are known: deriving them
+       * means listing the dWallets and running each public key through every chain's encoding, which the
+       * server cannot do and no other view repeats.
+       *
+       * `nextTargets` unfiltered, deliberately — CHAIN_ORDER governs what this page *displays*, and a
+       * chain that is derived but not shown is still an address that belongs to this account.
+       *
+       * Fire-and-forget: nothing below waits on it and nothing above depends on it, so the write cannot
+       * add a millisecond to a page load or break one if the database is down.
+       */
+      reportAccount(nextTargets);
+
       // Hand the Solana account up; the Sui page uses it to offer moving SOL in.
       const solana = addrMap.Solana;
       const solanaSrc = srcMap.Solana;
@@ -592,7 +609,7 @@ function AllChainsView({
       setLoading(false);
       prefetchSendModal();
     } catch (e) {
-      console.error(e);
+      logError(e);
       setError(friendlyError(e));
       setLoading(false);
     }

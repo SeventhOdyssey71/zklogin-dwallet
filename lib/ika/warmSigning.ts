@@ -33,6 +33,7 @@ import type { IkaClient } from '@ika.xyz/sdk';
 import { Curve } from '@ika.xyz/sdk';
 import type { AppSuiClient } from '@/lib/sui/client';
 import { ensureProtocolPublicParameters } from '@/lib/ika/protocolParams';
+import { warn } from '@/lib/utils/log';
 
 /**
  * Curves worth warming.
@@ -62,7 +63,7 @@ export function warmSigning(ikaClient: IkaClient, suiClient: AppSuiClient): void
     const job = ensureProtocolPublicParameters(ikaClient, suiClient, undefined, curve).catch((e) => {
       // Not cached as a failure: a transient RPC problem should not permanently disable the warm-up.
       started.delete(key);
-      console.warn(
+      warn(
         `[warm] protocol parameters for ${key} not pre-resolved (harmless, the send will do it):`,
         e instanceof Error ? e.message : e
       );

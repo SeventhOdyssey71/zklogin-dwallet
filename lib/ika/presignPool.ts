@@ -44,6 +44,7 @@ import { getIkaClient } from '@/lib/ika/ikaClient';
 import { prepareIkaFeeCoin } from '@/lib/ika/ikaFee';
 import { getGlobalPresignPolicy, requiresGlobalPresign } from '@/lib/ika/globalPresign';
 import { IKA_CONFIG } from '@/lib/config/network';
+import { debug, warn } from '@/lib/utils/log';
 
 /**
  * On-chain numbering for (curve, signature algorithm).
@@ -178,7 +179,7 @@ export async function primePresignPool(params: PoolParams): Promise<void> {
       await adoptOrphanedPresigns(params);
     } catch (e) {
       // Adoption is an optimisation; never let it block the ability to buy one.
-      console.warn('[presign] could not scan for reusable presignatures:', e);
+      warn('[presign] could not scan for reusable presignatures:', e);
     }
   }
 
@@ -210,7 +211,7 @@ export async function primePresignPool(params: PoolParams): Promise<void> {
  */
 export function refillInBackground(params: PoolParams): void {
   void primePresignPool(params).catch((e) => {
-    console.warn('[presign] background refill failed (harmless):', (e as Error).message);
+    warn('[presign] background refill failed (harmless):', (e as Error).message);
   });
 }
 
@@ -292,7 +293,7 @@ async function adoptOrphanedPresigns(params: PoolParams): Promise<void> {
   }
 
   if (banked > 0) {
-    console.log(
+    debug(
       `♻️ Reclaimed ${banked} pre-paid presignature${banked === 1 ? '' : 's'} from earlier attempts ` +
         `(~${(banked * 0.0209).toFixed(3)} SUI + ${(banked * 0.12).toFixed(2)} IKA already spent).`
     );

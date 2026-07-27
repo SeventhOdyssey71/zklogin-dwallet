@@ -36,6 +36,9 @@ import { Button, CopyField, ErrorNote, Skeleton, Stepper, truncate } from '@/com
 import { friendlyError, type FriendlyError } from '@/lib/ui/errors';
 import { prewarmZkLoginProof, zkLoginSignAndExecute } from '@/lib/zklogin/execute';
 import { warmSendPath } from '@/lib/ika/warmSendPath';
+import { reportTransaction } from '@/lib/account/report';
+import { FEE_LABEL, FEE_SUI } from '@/lib/fees/protocolFee';
+import { error as logError } from '@/lib/utils/log';
 import { Timings } from '@/lib/dwallet/core/timings';
 import { peek as peekBalance, subscribe as subscribeBalances } from '@/lib/balances/store';
 import { refreshGasBalances } from '@/lib/sui/useGasBalances';
@@ -623,6 +626,22 @@ export const SwapView = memo(function SwapView({
 
       setDepositTx(hash);
 
+      /**
+       * File the swap once the deposit is broadcast, not when it settles.
+       *
+       * This is the point at which the user's money has definitely left, which is what volume should
+       * count. Waiting for SUCCESS would silently drop every swap that refunded or that the user
+       * navigated away from, and those still moved funds and still cost them a fee.
+       */
+      reportTransaction({
+        kind: 'swap',
+        chain: route.fromChain,
+        symbol: route.fromSymbol,
+        amount: depositAmount,
+        counterparty: live.depositAddress,
+        txHash: hash,
+      });
+
       // Optional, and free: it only speeds up detection.
       notifyDeposit(hash, live.depositAddress);
 
@@ -634,7 +653,7 @@ export const SwapView = memo(function SwapView({
     } catch (e) {
       // Report on the way out too: a slow failure is exactly the case worth seeing a breakdown for.
       T.report();
-      console.error(e);
+      logError(e);
       setError(friendlyError(e));
       // Back to review, not to the start: the amount is still what they wanted.
       setPhase('review');
@@ -840,6 +859,8 @@ export const SwapView = memo(function SwapView({
             <Row label="Estimated time" value={`~${route.expectedSeconds}s`} />
             {/* Named, not implied: this is the promise that makes the risk above acceptable. */}
             <Row label="Refunds to" value={truncate(fromAddress, 6, 6)} />
+            {/* Ours, not the network's — see lib/fees/protocolFee.ts for why it is stated rather than folded in. */}
+            <Row label={FEE_LABEL} value={`${FEE_SUI} SUI`} />
           </div>
 
           {/*

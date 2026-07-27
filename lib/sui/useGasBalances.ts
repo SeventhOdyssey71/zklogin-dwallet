@@ -21,6 +21,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useSuiClient } from '@mysten/dapp-kit';
 import { IKA_COIN_TYPE } from '@/lib/config/network';
+import { warn } from '@/lib/utils/log';
 
 /** Every mounted instance's tick setter, so one refresh moves them all. */
 const listeners = new Set<() => void>();
@@ -78,7 +79,9 @@ export function useGasBalances(address: string | undefined) {
         setSui(fmt(s.totalBalance, 9));
         setIka(fmt(i.totalBalance, meta?.decimals ?? 9));
       } catch (e) {
-        console.error('Failed to load gas balances:', e);
+        // A swallowed read, not a fault: the values already on screen stay, and the next `tick`
+        // retries. A flaky connection would otherwise print this on a loop in a production console.
+        warn('Failed to load gas balances:', e);
       } finally {
         if (!cancelled) setLoading(false);
       }

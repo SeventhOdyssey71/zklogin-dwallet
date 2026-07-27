@@ -14,6 +14,7 @@ import { ethers } from 'ethers';
 import { ChainSigner, UnsignedTransaction, SignedTransactionResult } from '../core/types';
 import { MAINNET_CHAINS } from '../../config/chains';
 import { CHAIN_BY_ID } from '../../config/chainRegistry';
+import { debug, warn } from '@/lib/utils/log';
 
 /**
  * EVM chain configuration, from the shared registry.
@@ -132,11 +133,11 @@ export class EthereumSigner implements ChainSigner {
         const estimated = await provider.estimateGas({ from: fromAddress, to: recipient, value: 0n });
         gasLimit = (estimated * BigInt(125)) / BigInt(100);
       } catch {
-        console.warn(`⚠️ Gas estimation unavailable on ${this.chain}; using ${gasLimit} as the limit.`);
+        warn(`⚠️ Gas estimation unavailable on ${this.chain}; using ${gasLimit} as the limit.`);
       }
     }
 
-    console.log(
+    debug(
       `⛽ ${this.chain} (chainId ${config.chainId}): maxFee ${ethers.formatUnits(maxFeePerGas, 'gwei')} gwei, ` +
         `priority ${ethers.formatUnits(maxPriorityFeePerGas, 'gwei')} gwei, gasLimit ${gasLimit} ` +
         `(max ~${ethers.formatEther(maxFeePerGas * gasLimit)} native)`
@@ -163,9 +164,9 @@ export class EthereumSigner implements ChainSigner {
     const messageBytes = ethers.getBytes(serializedTx);  // Pass raw bytes directly
 
     if (process.env.NEXT_PUBLIC_DEBUG_SIGNING === '1') {
-      console.log(`✅ ${this.chain} tx built: ${messageBytes.length} bytes (raw serialized)`);
-      console.log(`📋 Serialized: ${serializedTx.substring(0, 40)}…`);
-      console.log(`📋 Expected hash after KECCAK256: ${ethers.keccak256(serializedTx)}`);
+      debug(`✅ ${this.chain} tx built: ${messageBytes.length} bytes (raw serialized)`);
+      debug(`📋 Serialized: ${serializedTx.substring(0, 40)}…`);
+      debug(`📋 Expected hash after KECCAK256: ${ethers.keccak256(serializedTx)}`);
     }
 
     return { messageBytes, unsignedTx };
@@ -181,9 +182,9 @@ export class EthereumSigner implements ChainSigner {
   ): Promise<SignedTransactionResult> {
     const config = evmConfig(this.chain);
 
-    console.log('📡 Broadcasting transaction to', this.chain);
-    console.log('🔍 Recovery ID (v):', recoveryId);
-    console.log('🔍 Signature length:', signature.length);
+    debug('📡 Broadcasting transaction to', this.chain);
+    debug('🔍 Recovery ID (v):', recoveryId);
+    debug('🔍 Signature length:', signature.length);
 
     // Convert signature to hex
     const signatureHex = '0x' + Buffer.from(signature).toString('hex');
@@ -200,22 +201,22 @@ export class EthereumSigner implements ChainSigner {
 
     const serialized = tx.serialized;
 
-    console.log('📋 Signed transaction (serialized):', serialized);
+    debug('📋 Signed transaction (serialized):', serialized);
 
     // Broadcast to network
     const provider = new ethers.JsonRpcProvider(config.rpcUrl);
     const txResponse = await provider.broadcastTransaction(serialized);
 
-    console.log('✅ Transaction broadcast!');
-    console.log('🔗 TX Hash:', txResponse.hash);
+    debug('✅ Transaction broadcast!');
+    debug('🔗 TX Hash:', txResponse.hash);
 
     // Wait for confirmation
-    console.log('⏳ Waiting for confirmation...');
+    debug('⏳ Waiting for confirmation...');
     const receipt = await txResponse.wait();
 
-    console.log('✅ Transaction confirmed!');
-    console.log('📦 Block:', receipt?.blockNumber);
-    console.log('✅ Status:', receipt?.status === 1 ? 'Success' : 'Failed');
+    debug('✅ Transaction confirmed!');
+    debug('📦 Block:', receipt?.blockNumber);
+    debug('✅ Status:', receipt?.status === 1 ? 'Success' : 'Failed');
 
     return {
       signature: signatureHex,

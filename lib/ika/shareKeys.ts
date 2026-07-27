@@ -23,6 +23,7 @@
  */
 
 import { UserShareEncryptionKeys, Curve } from '@ika.xyz/sdk';
+import { warn } from '@/lib/utils/log';
 
 /** Bumped if the derivation formula or SDK serialization format ever changes. */
 const CACHE_VERSION = 'v1';
@@ -72,7 +73,7 @@ export async function getShareEncryptionKeys(params: {
         return keys;
       }
     } catch (e) {
-      console.warn('[shareKeys] cached keys unusable, re-deriving:', e);
+      warn('[shareKeys] cached keys unusable, re-deriving:', e);
       try {
         window.sessionStorage.removeItem(cacheKey);
       } catch {

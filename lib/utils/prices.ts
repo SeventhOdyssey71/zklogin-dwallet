@@ -18,6 +18,7 @@
  */
 
 import type { ChainAsset } from '@/components/ChainChips';
+import { warn } from '@/lib/utils/log';
 
 export interface TokenMarket {
   price: number;
@@ -68,7 +69,7 @@ async function loadAssets(): Promise<Assets> {
         // One line per backoff window, not one per caller.
         if (Date.now() - loggedFailureAt > FAILURE_BACKOFF_MS.base) {
           loggedFailureAt = Date.now();
-          console.warn(
+          warn(
             `[prices] chain-assets unavailable (${e instanceof Error ? e.message : e}); ` +
               `showing ${cache ? 'cached' : 'no'} prices, retrying in ${Math.round(backoff / 2000)}s`
           );

@@ -12,6 +12,7 @@ import {
 import { ChainSigner, UnsignedTransaction, SignedTransactionResult } from '../core/types';
 import { SOLANA_MAINNET } from '../../config/chains';
 import { readDurableNonce } from './solanaNonce';
+import { debug, warn } from '@/lib/utils/log';
 
 /**
  * Solana chain signer
@@ -32,7 +33,7 @@ export class SolanaSigner implements ChainSigner {
     amount: string,
     fromAddress: string
   ): Promise<UnsignedTransaction> {
-    console.log(`📝 Building unsigned Solana transaction...`);
+    debug(`📝 Building unsigned Solana transaction...`);
 
     // Create public keys
     const fromPubkey = new PublicKey(fromAddress);
@@ -41,19 +42,19 @@ export class SolanaSigner implements ChainSigner {
     // Check balance before building transaction
     const balance = await this.connection.getBalance(fromPubkey);
     const balanceSOL = balance / LAMPORTS_PER_SOL;
-    console.log(`💰 Current balance: ${balanceSOL} SOL (${balance} lamports)`);
+    debug(`💰 Current balance: ${balanceSOL} SOL (${balance} lamports)`);
 
     // Convert SOL to lamports
     const lamports = Math.floor(parseFloat(amount) * LAMPORTS_PER_SOL);
 
-    console.log(`💰 Sending ${amount} SOL (${lamports} lamports)`);
-    console.log(`📤 From: ${fromAddress}`);
-    console.log(`📥 To: ${recipient}`);
+    debug(`💰 Sending ${amount} SOL (${lamports} lamports)`);
+    debug(`📤 From: ${fromAddress}`);
+    debug(`📥 To: ${recipient}`);
 
     // Warn if insufficient balance
     if (balance < lamports) {
-      console.warn(`⚠️ WARNING: Insufficient balance! Have ${balanceSOL} SOL, need ${amount} SOL`);
-      console.warn(`📋 This is Solana mainnet — fund ${fromAddress} with real SOL.`);
+      warn(`⚠️ WARNING: Insufficient balance! Have ${balanceSOL} SOL, need ${amount} SOL`);
+      warn(`📋 This is Solana mainnet — fund ${fromAddress} with real SOL.`);
     }
 
     /**
@@ -74,17 +75,17 @@ export class SolanaSigner implements ChainSigner {
     let lastValidBlockHeight: number | undefined;
 
     if (durable) {
-      console.log(`⏳ Using durable nonce ${durable.account.toBase58()} — this signature cannot expire`);
+      debug(`⏳ Using durable nonce ${durable.account.toBase58()} — this signature cannot expire`);
       blockhash = durable.nonce;
       transaction = new SolanaTransaction({
         feePayer: fromPubkey,
         nonceInfo: { nonce: durable.nonce, nonceInstruction: durable.advanceInstruction },
       });
     } else {
-      console.log('⏰ No durable nonce — fetching a fresh blockhash (expires in ~150s)…');
+      debug('⏰ No durable nonce — fetching a fresh blockhash (expires in ~150s)…');
       const started = Date.now();
       const latest = await this.connection.getLatestBlockhash('finalized');
-      console.log(`✅ Blockhash fetched in ${Date.now() - started}ms`);
+      debug(`✅ Blockhash fetched in ${Date.now() - started}ms`);
       blockhash = latest.blockhash;
       lastValidBlockHeight = latest.lastValidBlockHeight;
       transaction = new SolanaTransaction({
@@ -106,7 +107,7 @@ export class SolanaSigner implements ChainSigner {
     // Serialize the message for signing
     const messageBytes = transaction.serializeMessage();
 
-    console.log(`✅ Solana transaction built: ${messageBytes.length} bytes`);
+    debug(`✅ Solana transaction built: ${messageBytes.length} bytes`);
 
     return {
       messageBytes,
@@ -127,7 +128,7 @@ export class SolanaSigner implements ChainSigner {
     unsignedTx: any,
     signature: Uint8Array
   ): Promise<SignedTransactionResult> {
-    console.log('📡 Broadcasting transaction to Solana...');
+    debug('📡 Broadcasting transaction to Solana...');
 
     const { transaction } = unsignedTx;
 
@@ -144,11 +145,11 @@ export class SolanaSigner implements ChainSigner {
       preflightCommitment: 'confirmed',
     });
 
-    console.log('✅ Transaction broadcast!');
-    console.log('🔗 TX Signature:', txSignature);
+    debug('✅ Transaction broadcast!');
+    debug('🔗 TX Signature:', txSignature);
 
     // Wait for confirmation
-    console.log('⏳ Waiting for confirmation...');
+    debug('⏳ Waiting for confirmation...');
     const confirmation = await this.connection.confirmTransaction({
       signature: txSignature,
       blockhash: unsignedTx.blockhash,
@@ -159,7 +160,7 @@ export class SolanaSigner implements ChainSigner {
       throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
     }
 
-    console.log('✅ Transaction confirmed!');
+    debug('✅ Transaction confirmed!');
 
     return {
       signature: '0x' + Buffer.from(signature).toString('hex'),

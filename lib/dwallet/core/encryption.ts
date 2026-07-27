@@ -5,6 +5,7 @@
 import { UserShareEncryptionKeys, Curve } from '@ika.xyz/sdk';
 import { ethers } from 'ethers';
 import { getShareEncryptionKeys } from '@/lib/ika/shareKeys';
+import { debug } from '@/lib/utils/log';
 
 /**
  * The curve's label in the seed formula.
@@ -57,7 +58,7 @@ export function generateDeterministicEncryptionSeed(
 
   // Gated: this printed the address and the exact seed formula on every send and every dWallet read.
   if (process.env.NEXT_PUBLIC_DEBUG_SIGNING === '1') {
-    console.log(`🔐 Seed formula: KECCAK256("ika-dwallet-${suiAddress}-${curveString}")`);
+    debug(`🔐 Seed formula: KECCAK256("ika-dwallet-${suiAddress}-${curveString}")`);
   }
 
   return ethers.getBytes(seedHash);
@@ -76,7 +77,7 @@ export async function generateEncryptionKeys(
 ): Promise<UserShareEncryptionKeys> {
   const keys = await getShareEncryptionKeys({ suiAddress, curve, rootSeed: encryptionSeed });
   if (process.env.NEXT_PUBLIC_DEBUG_SIGNING === '1') {
-    console.log('✅ User share encryption keys ready');
+    debug('✅ User share encryption keys ready');
   }
   return keys;
 }

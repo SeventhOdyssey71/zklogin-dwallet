@@ -31,7 +31,9 @@ import { generateEncryptionKeys } from './core/encryption';
 import { getDWalletMeta } from './dwalletMeta';
 import { Timings } from './core/timings';
 import { prepareIkaFeeCoin } from '@/lib/ika/ikaFee';
+import { attachProtocolFee } from '@/lib/fees/protocolFee';
 import { MAINNET_CHAINS, SOLANA_MAINNET, txExplorerUrl } from '@/lib/config/chains';
+import { debug, error as logError, isDebugEnabled, warn } from '@/lib/utils/log';
 
 // Re-export types for backwards compatibility
 export type { SignTransactionParams, SignedTransactionResult } from './core/types';
@@ -54,13 +56,14 @@ const MPC_POLL = { timeout: 60_000, interval: 80 } as const;
  *
  * This flow logged ~200 lines per send, including full JSON dumps of transaction effects, the entire
  * events array and the whole dWallet object. That made the console unusable and hid real failures.
- * The numbered step markers below stay as ordinary logs so progress is still visible; everything else
- * is gated. Set NEXT_PUBLIC_DEBUG_SIGNING=1 for the full trace.
+ *
+ * The first pass at this kept the numbered step markers ("1️⃣ Presignature ready…", "✅ Signature
+ * received: 0x9ba8…") as ordinary logs, reasoning that progress should stay visible. That was the
+ * leak: those markers are precisely what a user sees, and progress already has a proper home — the
+ * `onProgress` callback a few lines below, which drives the send dialog. The console is now the
+ * developer's channel only, and the UI is the user's. See lib/utils/log.ts for the escape hatch that
+ * turns the trace back on against a production build.
  */
-const SIGN_VERBOSE = process.env.NEXT_PUBLIC_DEBUG_SIGNING === '1';
-const debug = (...args: unknown[]) => {
-  if (SIGN_VERBOSE) console.log(...args);
-};
 
 
 /**
@@ -235,7 +238,7 @@ export async function signWithDWallet(
       throw new Error('User output signature is missing from the encrypted share. Please recreate your dWallet.');
     }
   } else if (!meta.isShared && !meta.isImportedKey) {
-    console.warn('⚠️ No encrypted user share found — signing may fail.');
+    warn('⚠️ No encrypted user share found — signing may fail.');
   }
   const encryptedUserSecretKeyShare = encShare;
 
@@ -266,7 +269,7 @@ export async function signWithDWallet(
   const banked = takeReady(suiAddress, curve, signatureAlgorithm);
 
   if (banked) {
-    console.log('1️⃣ Presignature ready from the pool (v4, zero wait)');
+    debug('1️⃣ Presignature ready from the pool (v4, zero wait)');
     step('Presignature ready — preparing the transaction…');
     completedPresign = banked.presign as typeof completedPresign;
     T.note('presign (from pool)', performance.now() - presignWait);
@@ -274,7 +277,7 @@ export async function signWithDWallet(
     // Nothing banked. Joining a purchase already in flight beats starting another — same cost, head
     // start — and otherwise we buy one now.
     const inflight = pendingPresign(suiAddress, curve, signatureAlgorithm);
-    console.log(
+    debug(
       inflight
         ? '1️⃣ Joining a presignature purchase already in flight…'
         : '1️⃣ No banked presignature — buying one now (this is the slow path)…'
@@ -315,7 +318,7 @@ export async function signWithDWallet(
 
   const blockhashFetchTime = Date.now();
 
-  console.log('2️⃣ Requesting signature…');
+  debug('2️⃣ Requesting signature…');
   step('Building your signature request…');
 
   const signTx = new Transaction();
@@ -327,6 +330,19 @@ export async function signWithDWallet(
 
   // Fresh fee coin for the sign transaction (same address-balance-safe path as the presign).
   signTx.setSender(params.userAccount.address);
+
+  /**
+   * The ycos service fee, charged once per send.
+   *
+   * Attached to the SIGN transaction specifically, and not to the presignature: a send can buy a
+   * presignature, be abandoned, and buy another, so charging there would bill a user several times for
+   * one transfer — or bill them for a transfer they never made. This transaction happens exactly once
+   * per signature, so the fee does too.
+   *
+   * It rides inside the transaction the user is already signing, so it cannot succeed independently: if
+   * the signature request fails, the fee fails with it and nothing is taken.
+   */
+  attachProtocolFee(signTx);
   const signFee = await T.step('IKA fee coin', () =>
     prepareIkaFeeCoin({
       tx: signTx,
@@ -414,7 +430,7 @@ export async function signWithDWallet(
     if (predecrypted) {
       requestSignParams.secretShare = predecrypted.secretShare;
       requestSignParams.publicOutput = predecrypted.publicOutput;
-      console.log('🔓 Using pre-decrypted key share (off the critical path)');
+      debug('🔓 Using pre-decrypted key share (off the critical path)');
     } else if (encryptedUserSecretKeyShare) {
       requestSignParams.encryptedUserSecretKeyShare = encryptedUserSecretKeyShare;
       debug('📝 Decrypting the user share inline (not pre-decrypted)');
@@ -470,7 +486,7 @@ export async function signWithDWallet(
   // Check if transaction succeeded
   if (signTxDetails.effects?.status?.status !== 'success') {
     const error = signTxDetails.effects?.status?.error || 'Unknown error';
-    console.error('❌ Sign transaction failed with status:', signTxDetails.effects?.status);
+    logError('❌ Sign transaction failed with status:', signTxDetails.effects?.status);
 
     if (error === 'InsufficientGas') {
       throw new Error(
@@ -523,8 +539,10 @@ export async function signWithDWallet(
   }
 
   if (!signId) {
-    console.error('❌ Could not find sign session ID');
-    console.error('Full transaction details:', JSON.stringify(signTxDetails, null, 2));
+    logError('❌ Could not find sign session ID');
+    // The full dump is the diagnostic, but it is also a multi-kilobyte stringify of a transaction
+    // result — worth paying for when someone is looking, not on every production failure.
+    if (isDebugEnabled()) logError('Full transaction details:', JSON.stringify(signTxDetails, null, 2));
     throw new Error('Sign session ID not found in transaction result');
   }
 
@@ -533,7 +551,7 @@ export async function signWithDWallet(
   // === STEP 4: Poll for Signature Completion ===
   // With a pooled presign this is the single online round the v4 upgrade reduced to ~400ms, so a
   // 2s poll interval could more than triple the observed signing latency on its own.
-  console.log('3️⃣ Waiting for the MPC signature…');
+  debug('3️⃣ Waiting for the MPC signature…');
   step('Ika network is signing (this is the longest step)…');
 
   const completedSign = await T.step('MPC sign round', () =>
@@ -555,12 +573,12 @@ export async function signWithDWallet(
 
   // Calculate time elapsed for Solana
   const signingTimeElapsed = Date.now() - blockhashFetchTime;
-  console.log('✅ Signature received:', signatureHex.substring(0, 20) + '...');
+  debug('✅ Signature received:', signatureHex.substring(0, 20) + '...');
   debug(`⏱️  Signing took ${(signingTimeElapsed / 1000).toFixed(1)} seconds`);
   debug(`⏰ Time remaining until blockhash expiration: ~${Math.max(0, 150 - signingTimeElapsed / 1000).toFixed(0)} seconds`);
 
   // === STEP 5: Construct Signed Transaction ===
-  console.log('4️⃣ Constructing signed transaction…');
+  debug('4️⃣ Constructing signed transaction…');
   step('Signature received — assembling the transaction…');
 
   let serialized: string;
@@ -735,8 +753,14 @@ export async function signWithDWallet(
 
       // If still no match, use the first valid signature we found
       if (!signedTx && foundV !== null && foundAddress) {
-        console.warn('⚠️  Stored address does not match ANY signature recovery.');
-        console.warn('⚠️  Using recovered address from v=' + foundV + ':', foundAddress);
+        /**
+         * Not a `warn`: the transaction is about to be broadcast from an address the wallet did not
+         * expect, which means the nonce may be wrong and the funds may not be there. Nothing downstream
+         * handles that — the user is going to see it fail — so this is the one place in the recovery
+         * loop that must reach a production console.
+         */
+        logError('❌ Stored address does not match ANY signature recovery.');
+        logError('❌ Using recovered address from v=' + foundV + ':', foundAddress);
 
         const fallbackTx = ethers.Transaction.from(unsignedTx);
         fallbackTx.signature = ethers.Signature.from({ r, s, v: foundV });
@@ -811,11 +835,11 @@ export async function broadcastTransaction(
   chain: string,
   serialized: string
 ): Promise<{ txHash: string }> {
-  console.log(`📡 Broadcasting ${chain} transaction...`);
+  debug(`📡 Broadcasting ${chain} transaction...`);
 
   if (chain === 'Bitcoin') {
     // Broadcast Bitcoin transaction
-    console.log('📡 Broadcasting Bitcoin transaction to Blockstream API...');
+    debug('📡 Broadcasting Bitcoin transaction to Blockstream API...');
 
     // The serialized transaction should be hex-encoded
     const txHex = serialized;
@@ -842,14 +866,14 @@ export async function broadcastTransaction(
 
       return { txHash };
     } catch (error) {
-      console.error('❌ Bitcoin broadcast failed:', error);
+      logError('❌ Bitcoin broadcast failed:', error);
       throw error;
     }
   } else if (chain === 'Solana') {
     // Broadcast Solana transaction (mainnet-beta)
     const connection = new Connection(SOLANA_MAINNET.rpcUrl, 'confirmed');
 
-    console.log('📡 Broadcasting Solana transaction...');
+    debug('📡 Broadcasting Solana transaction...');
 
     // Deserialize the transaction
     const txBuffer = Buffer.from(serialized, 'base64');
@@ -885,7 +909,7 @@ export async function broadcastTransaction(
 
     const signature = txSignature;
 
-    console.log('✅ Transaction submitted:', signature);
+    debug('✅ Transaction submitted:', signature);
     debug('📋 Solana Explorer:', txExplorerUrl('Solana', signature));
 
     /**
@@ -900,11 +924,11 @@ export async function broadcastTransaction(
       .confirmTransaction(signature, 'confirmed')
       .then((c) =>
         c.value.err
-          ? console.error('❌ Solana transaction failed on chain:', c.value.err)
-          : console.log('✅ Solana transaction confirmed:', signature)
+          ? logError('❌ Solana transaction failed on chain:', c.value.err)
+          : debug('✅ Solana transaction confirmed:', signature)
       )
       .catch((e) =>
-        console.warn(
+        warn(
           `⚠️ Could not confirm ${signature} (it may still succeed): ${(e as Error).message}`
         )
       );
@@ -922,7 +946,7 @@ export async function broadcastTransaction(
     const provider = new ethers.JsonRpcProvider(rpcUrl);
     const txResponse = await provider.broadcastTransaction(serialized);
 
-    console.log('✅ Transaction submitted:', txResponse.hash);
+    debug('✅ Transaction submitted:', txResponse.hash);
 
     /**
      * Don't block the send on inclusion.
@@ -935,11 +959,11 @@ export async function broadcastTransaction(
       .wait()
       .then((receipt) =>
         receipt?.status === 1
-          ? console.log(`✅ ${chain} transaction confirmed in block ${receipt.blockNumber}`)
-          : console.error(`❌ ${chain} transaction reverted:`, txResponse.hash)
+          ? debug(`✅ ${chain} transaction confirmed in block ${receipt.blockNumber}`)
+          : logError(`❌ ${chain} transaction reverted:`, txResponse.hash)
       )
       .catch((e) =>
-        console.warn(
+        warn(
           `⚠️ Could not confirm ${txResponse.hash} (it may still be mined): ${(e as Error).message}`
         )
       );

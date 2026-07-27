@@ -23,6 +23,7 @@
  */
 
 import { MAINNET_CHAINS, SOLANA_MAINNET } from '@/lib/config/chains';
+import { debug, warn } from '@/lib/utils/log';
 
 export interface WatchTarget {
   chain: string;
@@ -148,7 +149,7 @@ export function watchDeposits(options: WatchOptions): Cleanup {
         try {
           onOpen(ws!);
         } catch (e) {
-          console.warn(`[deposits] ${label} subscribe failed`, e);
+          warn(`[deposits] ${label} subscribe failed`, e);
         }
       };
       ws.onmessage = (ev) => onMessage(String(ev.data), ws!);
@@ -275,7 +276,7 @@ export function watchDeposits(options: WatchOptions): Cleanup {
     // If the socket hasn't opened shortly, assume it's unavailable here and poll instead.
     const btcProbe = setTimeout(() => {
       if (!btcLive && !stopped) {
-        console.info('[deposits] Bitcoin realtime unavailable — polling instead');
+        debug('[deposits] Bitcoin realtime unavailable — polling instead');
         startBtcPolling();
       }
     }, 5_000);

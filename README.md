@@ -144,6 +144,7 @@ lib/
     deriveAddresses.ts  public key → per-chain address (shared by detail + balances)
     fetchBalances.ts    per-chain RPC balances + USD value (two-phase, non-blocking)
     prices.ts           CoinGecko price + logo client helper
+    log.ts              the one gate deciding what reaches a user's console (see "Running")
   config/chains.ts      MAINNET RPCs, chain ids, native currencies, explorer URLs
   config/network.ts     Sui mainnet + Ika mainnet config (single source of truth)
   sui/client.ts         AppSuiClient type + factory (@mysten/sui v2 SuiJsonRpcClient)
@@ -208,6 +209,34 @@ IKA → **Create** your ECDSA and EdDSA dWallets → open one (or **All chains**
 
 The header shows the live **presignature pool** depth read from the mainnet coordinator — that's the
 2PC-MPC v4 pool your signatures are served from.
+
+### Turning on the console trace
+
+A production build's console is silent apart from genuine, unhandled faults. A send narrates itself
+in some detail — every MPC phase, the timing breakdown, each endpoint the balance layer rotates out —
+and none of that is a user's business, so it is gated. To switch it back on **against a deployed
+build, with no rebuild**, in the browser console:
+
+```js
+ycosDebug(true);   // or: localStorage.setItem('ycos.debug', '1')
+location.reload();
+```
+
+and to stop:
+
+```js
+ycosDebug(false);  // or: localStorage.removeItem('ycos.debug')
+location.reload();
+```
+
+`pnpm dev` is verbose already. The flag is read once per page load, which is why both forms want the
+reload. Ask for this first on any bug report — it is the difference between "it failed" and a phase
+table showing exactly which leg of the send ran long. The line between *silent-in-production* and
+*always-reported* is drawn, with reasons, at the top of `lib/utils/log.ts`.
+
+One thing the flag cannot touch: `net::ERR_CONNECTION_CLOSED`, `429`, and CORS rejections are printed
+by the browser's own network stack before any JavaScript sees them, so no gate can hide them. The fix
+for those is fewer failing requests — see the circuit breaker in `lib/balances/rpc.ts`.
 
 ---
 

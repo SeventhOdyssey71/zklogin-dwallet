@@ -21,6 +21,7 @@ import { friendlyError, type FriendlyError } from '@/lib/ui/errors';
 import { recordSend } from '@/lib/history/store';
 import { zkLoginSignAndExecute } from '@/lib/zklogin/execute';
 import { refreshGasBalances } from '@/lib/sui/useGasBalances';
+import { FEE_LABEL, FEE_SUI } from '@/lib/fees/protocolFee';
 import { suiTxUrl, suiObjectUrl, IKA_ACQUIRE_URL } from '@/lib/config/network';
 import {
   fetchSuiWalletAssets,
@@ -33,6 +34,7 @@ import {
   type SuiAsset,
 } from '@/lib/sui/sendSui';
 import type { AppSuiClient } from '@/lib/sui/client';
+import { error as logError, warn } from '@/lib/utils/log';
 
 const SUI_LOGO = 'https://cryptologos.cc/logos/sui-sui-logo.png';
 const IKA_LOGO = 'https://coin-images.coingecko.com/coins/images/67598/large/ika.jpg?1753770879';
@@ -74,7 +76,9 @@ export function SuiWalletView({
       try {
         setAssets(await fetchSuiWalletAssets(suiClient, address));
       } catch (e) {
-        console.error('Failed to load Sui wallet assets:', e);
+        // Same reasoning as the effect below: a failed read leaves the last good list on screen and
+        // the next load retries, so this is an anticipated transient rather than something to report.
+        warn('Failed to load Sui wallet assets:', e);
       } finally {
         setLoading(false);
       }
@@ -86,7 +90,7 @@ export function SuiWalletView({
     let cancelled = false;
     void (async () => {
       const next = await fetchSuiWalletAssets(suiClient, address).catch((e) => {
-        console.error('Failed to load Sui wallet assets:', e);
+        warn('Failed to load Sui wallet assets:', e);
         return [] as SuiAsset[];
       });
       if (cancelled) return;
@@ -158,7 +162,7 @@ export function SuiWalletView({
        */
       refreshGasBalances();
     } catch (e) {
-      console.error(e);
+      logError(e);
       const friendly = friendlyError(e);
       setError(friendly);
       toast.error('Send failed', { description: friendly.message });
@@ -330,6 +334,17 @@ export function SuiWalletView({
         )}
 
         {error && <ErrorNote {...error} />}
+
+        {/*
+          Stated before the button, not after the fact.
+          
+          It is ours rather than the network's, and it is trivially visible on chain, so naming it costs
+          one line and buys the difference between a charge and a surprise. See lib/fees/protocolFee.ts.
+        */}
+        <div className="flex items-baseline justify-between">
+          <span className="mono-label">{FEE_LABEL}</span>
+          <span className="num text-xs text-[var(--muted)]">{FEE_SUI} SUI</span>
+        </div>
 
         <Button
           size="lg"
